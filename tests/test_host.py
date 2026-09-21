@@ -300,6 +300,27 @@ def test_network_failure_is_chinese_and_leaks_nothing(monkeypatch) -> None:
             assert forbidden not in message
 
 
+def test_a_write_that_outlived_its_timeout_says_slow_not_unreachable(monkeypatch) -> None:
+    """The host can apply /stop and answer after our client gave up (measured).
+
+    Calling that "未能连接宿主管理接口，请到插件中心手动停止" sends the user to fix
+    something that is already fixed; the copy has to say it is slow and that the
+    plugin will re-check.
+    """
+    for attempt in range(2):
+        control_obj, _ = control(monkeypatch, net.NetworkError("请求超时"))
+        if attempt:
+            ok, message = control_obj.set_enabled(PID, False)
+            assert ok is False
+        else:
+            state = control_obj.status(PID)
+            message = state.error
+        assert message == host.MESSAGE_SLOW
+        assert "自动再确认" in message
+        for forbidden in ("http", "127.0.0.1", "Traceback", "Errno"):
+            assert forbidden not in message
+
+
 def test_unexpected_exception_never_escapes(monkeypatch) -> None:
     class Boom(RuntimeError):
         pass

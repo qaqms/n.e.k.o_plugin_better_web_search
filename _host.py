@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import urllib.parse
 from dataclasses import dataclass, field
 from typing import Any
@@ -68,6 +69,12 @@ CODE_OPERATION_BUSY = "PLUGIN_OPERATION_BUSY"
 MESSAGE_STOPPED = "内置『网络搜索』已停用，搜索将由本插件提供"
 MESSAGE_STARTED = "内置『网络搜索』已启用，若想让本插件独占搜索，请再次点击停用"
 MESSAGE_UNREACHABLE = "未能连接宿主管理接口，请到插件中心手动停止『网络搜索』"
+# Measured on a packaged host: /plugin/<id>/stop can sit behind the registry
+# reload for 8+ seconds after a plugin starts, then answer late. That is not a
+# connectivity problem, and telling the user to go click around the plugin centre
+# while the request is merely slow is how the toggle got pressed twice.
+MESSAGE_SLOW = ("宿主管理接口这次回答太慢（多半正在重载插件列表），"
+                "本插件会在后台自动再确认，不用手动点")
 MESSAGE_STATUS_FAILED = "未能读取宿主插件状态，请到插件中心确认『网络搜索』是否在运行"
 MESSAGE_BUSY = "宿主正在处理其它插件操作，请稍等几秒后再试一次"
 MESSAGE_NOT_FOUND = "宿主里没有可切换的内置『网络搜索』，请确认宿主版本"
@@ -330,6 +337,18 @@ def _status_of(error: Any) -> int:
         return 0
 
 
+def _timed_out(error: BaseException) -> bool:
+    """Did *our own* transport say the request hung past its timeout?
+
+    Matched against ``_net``'s fixed copy (never upstream text, which could be
+    anything). A hang means the host is slow to answer -- the caller should
+    re-check the state instead of sending the user to the plugin centre.
+    """
+    if isinstance(error, (TimeoutError, socket.timeout)):
+        return True
+    return "请求超时" in _as_text(error)
+
+
 def _header_of(response: Any, name: str) -> str:
     getter = getattr(response, "header", None)
     if not callable(getter):
@@ -448,6 +467,8 @@ class HostPluginControl:
     def _failed_state(self, plugin_id: str, error: BaseException) -> HostPluginState:
         if isinstance(error, _net.HttpStatusCodeError):
             hint = _with_code(MESSAGE_STATUS_FAILED, _code_from_exception(error))
+        elif _timed_out(error):
+            hint = MESSAGE_SLOW
         else:
             hint = MESSAGE_UNREACHABLE
         return HostPluginState(plugin_id, False, False, {"error": hint})
@@ -488,7 +509,7 @@ class HostPluginControl:
 
     def _write_failure(self, error: BaseException, want_on: bool) -> tuple[bool, str]:
         if not isinstance(error, _net.HttpStatusCodeError):
-            return False, MESSAGE_UNREACHABLE
+            return False, MESSAGE_SLOW if _timed_out(error) else MESSAGE_UNREACHABLE
         status = _status_of(error)
         code = _code_from_exception(error)
         if not want_on and status == 404 and code in ("", CODE_NOT_RUNNING):

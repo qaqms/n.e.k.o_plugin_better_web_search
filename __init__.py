@@ -44,6 +44,7 @@ from plugin.sdk.plugin import (
     lifecycle,
     neko_plugin,
     plugin_entry,
+    timer_interval,
     ui,
 )
 
@@ -178,6 +179,9 @@ class BetterWebSearchPlugin(NekoPluginBase):
         # Why the latest "停用内置搜索" attempt failed, surfaced on the panel so a
         # slow host answer is not silently swallowed into a log line.
         self._takeover_error: str = ""
+        # "The user asked for the built-in off and we have not proven it yet." Set
+        # by startup and by a failed toggle; cleared by the status read in the tick.
+        self._takeover_pending: bool = False
         # The one search the user just asked about, shaped for the panel. Only
         # counts, timings and backend names -- never the query text.
         self._last_search: Optional[Dict[str, Any]] = None
@@ -387,7 +391,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
             order, effective, self._text("proxy", "auto"), proxies_present,
             bool(self._text("anysearch_api_key")), len(self._exa_keys()),
         )
-        await self._assert_host_takeover()
+        self._arm_host_takeover()
         await self._maybe_send_first_run_notice()
         payload = {
             "status": "running",
@@ -423,22 +427,50 @@ class BetterWebSearchPlugin(NekoPluginBase):
         except Exception:  # status reporting is best-effort, never fatal
             self.logger.exception("report_status failed (ignored)")
 
-    async def _assert_host_takeover(self) -> None:
-        """Re-assert "built-in search off" when the user opted in (plan §1.5).
+    def _arm_host_takeover(self) -> None:
+        """Note that the user opted into "built-in search off" (plan §1.5).
 
-        Idempotent: ``_host`` treats 404 PLUGIN_NOT_RUNNING as success. Any
-        failure is logged and swallowed -- a plugin whose host API is not up
-        yet must still start and search.
+        Deliberately not awaited from ``startup``: the host can hold
+        ``/plugin/web_search/stop`` behind its own registry reload for 8+ seconds
+        -- measured on a packaged host, which applied the change and answered at
+        exactly the moment our client gave up. Blocking there burned most of the
+        10 s startup budget (which ``config_change`` reuses) and reported a change
+        that *had* landed as "未能连接宿主管理接口", pushing the user to click around
+        the plugin centre for something that was already done.
         """
         if not self._flag_in("host", "takeover_search", False):
+            self._takeover_pending = False
+            self._takeover_error = ""
             return
-        try:
-            ok, message = await asyncio.to_thread(self._host_set_enabled_sync, False)
-            self._takeover_error = "" if ok else message
-            self.logger.info("host takeover re-asserted: ok={} message={}", ok, message)
-        except Exception as error:
-            self._takeover_error = _MSG_NO_HOST
-            self.logger.info("host takeover re-assert failed: {}:{}", type(error).__name__, error)
+        self._takeover_pending = True
+
+    @timer_interval(id="host_takeover", seconds=20, name="兑现停用内置搜索")
+    async def watch_host_takeover(self, **_):
+        """Prove the built-in search is stopped, and ask again until it is.
+
+        The status read decides, not the POST's reply: a late answer whose change
+        landed is success, and a host that is merely busy gets retried on the next
+        tick instead of being reported as unreachable.
+        """
+        if not self._takeover_pending or not self._flag_in("host", "takeover_search", False):
+            return Ok({"pending": False})
+
+        state = await asyncio.to_thread(self._host_search_state_sync, 4.0)
+        self._remember_host_state(state)
+        if state.get("error"):
+            self._takeover_error = str(state["error"])
+            self.logger.info("host takeover still pending: {}", self._takeover_error)
+            return Ok({"pending": True, "checked": False})
+        if not state.get("running"):
+            self._takeover_pending = False
+            self._takeover_error = ""
+            self.logger.info("host takeover confirmed: builtin web_search is not running")
+            return Ok({"pending": False, "confirmed": True})
+
+        ok, message = await asyncio.to_thread(self._host_set_enabled_sync, False)
+        self._takeover_error = "" if ok else message
+        self.logger.info("host takeover re-asserted: ok={} message={}", ok, message)
+        return Ok({"pending": True, "sent": ok})
 
     async def _maybe_send_first_run_notice(self) -> None:
         """Let the cat-girl introduce the panel, exactly once per install.
@@ -596,6 +628,10 @@ class BetterWebSearchPlugin(NekoPluginBase):
             self._key_state = "valid"
             self._quota_state = ""
             self._exa_last_error = ""
+            # Which of the pool answered is otherwise unanswerable from the logs,
+            # and "did my new key get used?" is the first thing to ask after a
+            # rotation change. The fingerprint is a hash, not the secret.
+            self.logger.info("exa served by key {}", finger)
             return results
 
         if can_degrade:
@@ -1421,9 +1457,21 @@ class BetterWebSearchPlugin(NekoPluginBase):
         try:
             # Sync loopback HTTP -> worker thread; never blocks the plugin loop.
             ok, message = await asyncio.to_thread(self._host_set_enabled_sync, want)
+            if not ok:
+                # A late answer is not a failure: the host can apply the change and
+                # reply after our timeout -- exactly what the startup path measured.
+                # 8 s for the write + 4 s for the read still fits this entry's 15 s.
+                state = await asyncio.to_thread(self._host_search_state_sync, 4.0)
+                self._remember_host_state(state)
+                if not state.get("error") and bool(state.get("running")) is want:
+                    ok = True
+                    message = _host.MESSAGE_STARTED if want else _host.MESSAGE_STOPPED
         except Exception as error:
             self.logger.info("host toggle failed: {}:{}", type(error).__name__, error)
             ok, message = False, _MSG_NO_HOST
+        # What the switch promises is "the built-in is off", not "one POST was
+        # acknowledged in time". Unproven goes to the tick, not to a red message.
+        self._takeover_pending = bool(not ok and not want)
         self._takeover_error = "" if ok else message
         self.logger.info("host search toggle: want_enabled={} ok={}", want, ok)
         return Ok({"ok": ok, "message": message, "takeover": not want,

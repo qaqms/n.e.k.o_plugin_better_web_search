@@ -120,6 +120,7 @@ def make_plugin(search: dict | None = None, *, net_: dict | None = None,
     plugin._key_at = ""
     plugin._key_at_saved = ""
     plugin.store = FakeStore()
+    plugin._takeover_pending = False
     plugin._last_search = None
     plugin.config = FakeConfig(data)
     sections = plugin._sections
@@ -637,6 +638,21 @@ def test_a_fresh_install_still_searchs_anonymously(monkeypatch) -> None:
     plugin = make_plugin()
     assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
     assert seen == [""]
+
+
+def test_the_log_says_which_key_answered_without_naming_it(monkeypatch) -> None:
+    """"Did the new key get used?" must be answerable from the logs.
+
+    The host does not log payloads, and a pool of two looks identical to a pool of
+    one from the outside. The fingerprint is what gets printed -- a hash, not the
+    secret -- so "restart and check the ring starts where it stopped" is testable.
+    """
+    _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin._fetcher("exa", "q", 3, 5.0)()
+    blob = plugin.logger.blob()
+    assert _finger(plugin, KEY_A) in blob
+    assert KEY_A not in blob and KEY_B not in blob
 
 
 def test_pool_never_leaks_a_key_into_panel_context_or_logs(monkeypatch) -> None:
@@ -1213,6 +1229,104 @@ def test_get_and_set_host_search_entries(monkeypatch) -> None:
     assert plugin._sections["host"]["takeover_search"] is True
 
 
+def test_startup_never_waits_on_the_host_management_api(monkeypatch) -> None:
+    """Measured: the host answered /stop at exactly the moment our client gave up.
+
+    That await spent 8 of the 10 seconds the host allows a plugin to boot -- and
+    ``config_change`` re-runs ``startup``, so every config edit paid it too, for a
+    change the host had already applied.
+    """
+    def never(*_args, **_kw):
+        raise AssertionError("startup must not call the host management API")
+
+    monkeypatch.setattr(entries._host, "HostPluginControl", never)
+    plugin = make_plugin(host_={"takeover_search": True})
+    assert asyncio.run(plugin.startup()).is_ok()      # boots anyway, searches anyway
+    assert plugin._takeover_pending is True
+
+
+def test_the_tick_accepts_a_toggle_the_status_read_proves(monkeypatch) -> None:
+    class Stopped(FakeControl):
+        def status(self, plugin_id):
+            FakeControl.calls.append(("status", plugin_id))
+            return entries._host.HostPluginState(plugin_id, True, False, {})
+
+    FakeControl.calls = []
+    monkeypatch.setattr(entries._host, "HostPluginControl", Stopped)
+    plugin = make_plugin(host_={"takeover_search": True})
+    plugin._takeover_pending = True
+    plugin._takeover_error = entries._host.MESSAGE_SLOW
+    assert asyncio.run(plugin.watch_host_takeover()).is_ok()
+    assert FakeControl.calls == [("status", entries._host.BUILTIN_SEARCH_PLUGIN_ID)]
+    assert plugin._takeover_pending is False
+    assert plugin._takeover_error == ""
+
+
+def test_the_tick_asks_again_until_the_stop_is_proven(monkeypatch) -> None:
+    """Sent is not done: the tick stays pending so the next one re-reads the state."""
+    FakeControl.calls = []
+    FakeControl.outcome = (True, entries._host.MESSAGE_STOPPED)
+    monkeypatch.setattr(entries._host, "HostPluginControl", FakeControl)   # status: running
+    plugin = make_plugin(host_={"takeover_search": True})
+    plugin._takeover_pending = True
+    asyncio.run(plugin.watch_host_takeover())
+    assert ("set", entries._host.BUILTIN_SEARCH_PLUGIN_ID, False) in FakeControl.calls
+    assert plugin._takeover_pending is True
+    assert plugin._takeover_error == ""
+
+
+def test_a_busy_management_api_stays_pending_instead_of_blaming_the_link(monkeypatch) -> None:
+    class Busy(FakeControl):
+        def status(self, plugin_id):
+            return entries._host.HostPluginState(plugin_id, False, False,
+                                                 {"error": entries._host.MESSAGE_SLOW})
+
+    monkeypatch.setattr(entries._host, "HostPluginControl", Busy)
+    plugin = make_plugin(host_={"takeover_search": True})
+    plugin._takeover_pending = True
+    asyncio.run(plugin.watch_host_takeover())
+    assert plugin._takeover_pending is True                 # retried on the next tick
+    assert plugin._takeover_error == entries._host.MESSAGE_SLOW
+
+
+def test_a_slow_toggle_that_landed_reports_success_not_a_failure(monkeypatch) -> None:
+    """Click 停用, the POST times out, the built-in is stopped anyway: that is ok.
+
+    Leaving ``_takeover_pending`` false here matters -- the panel would otherwise
+    keep saying "not applied" about a state that already holds.
+    """
+    class Late(FakeControl):
+        def set_enabled(self, plugin_id, enabled):
+            FakeControl.calls.append(("set", plugin_id, enabled))
+            return False, entries._host.MESSAGE_SLOW
+
+        def status(self, plugin_id):
+            FakeControl.calls.append(("status", plugin_id))
+            return entries._host.HostPluginState(plugin_id, True, False, {})
+
+    FakeControl.calls = []
+    monkeypatch.setattr(entries._host, "HostPluginControl", Late)
+    plugin = make_plugin()
+    result = asyncio.run(plugin.set_host_search(enabled=False))
+    assert result.value["ok"] is True
+    assert result.value["message"] == entries._host.MESSAGE_STOPPED
+    assert plugin._takeover_pending is False
+    assert plugin._takeover_error == ""
+
+
+def test_an_unproven_toggle_is_handed_to_the_tick(monkeypatch) -> None:
+    class StillRunning(FakeControl):
+        def set_enabled(self, plugin_id, enabled):
+            return False, entries._host.MESSAGE_SLOW
+
+    monkeypatch.setattr(entries._host, "HostPluginControl", StillRunning)
+    plugin = make_plugin()
+    result = asyncio.run(plugin.set_host_search(enabled=False))
+    assert result.value["ok"] is False
+    assert plugin._takeover_pending is True         # the tick finishes the job
+    assert plugin._takeover_error == entries._host.MESSAGE_SLOW
+
+
 def test_panel_context_caches_the_host_read_so_switches_stop_hanging(monkeypatch) -> None:
     """Every action ends with a context refresh; it must not re-pay the round trip."""
     reads = []
@@ -1345,19 +1459,30 @@ def test_first_run_notice_skipped_when_stage_or_host_says_no() -> None:
     assert plugin2._sections["ui"].get("first_run_notice_sent") is not True  # retry next boot
 
 
-def test_startup_reasserts_takeover_and_never_fails(monkeypatch) -> None:
+def test_the_tick_swallows_a_dead_management_api_and_retries(monkeypatch) -> None:
+    """"Must never break the boot" moves with the work to the tick.
+
+    A host that is not listening at all still leaves the plugin running and
+    searching; the toggle stays pending for the next tick instead of failing a
+    lifecycle entry.
+    """
     seen: list[tuple] = []
 
     class Toggle(FakeControl):
+        def status(self, plugin_id):
+            raise RuntimeError("host not listening")
+
         def set_enabled(self, plugin_id, enabled):
             seen.append((plugin_id, enabled))
-            raise RuntimeError("host not listening")    # must be swallowed
 
     monkeypatch.setattr(entries._host, "HostPluginControl", Toggle)
     plugin = make_plugin(host_={"takeover_search": True})
-    result = asyncio.run(plugin.startup())
+    plugin._takeover_pending = True
+    result = asyncio.run(plugin.watch_host_takeover())
     assert result.is_ok()
-    assert seen == [(entries._host.BUILTIN_SEARCH_PLUGIN_ID, False)]
+    assert seen == []                                      # the read failed first
+    assert plugin._takeover_pending is True
+    assert plugin._takeover_error == entries._MSG_NO_HOST
 
 
 def test_startup_without_takeover_does_not_touch_host(monkeypatch) -> None:

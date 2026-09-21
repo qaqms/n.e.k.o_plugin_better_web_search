@@ -198,7 +198,7 @@ searxng_base_url = ""       # 自建实例，例如 http://127.0.0.1:8888
 ssrf_allow_ranges = ["198.18.0.0/15"]   # TUN+fake-ip 兼容，只对域名解析结果放行
 
 [host]
-takeover_search = false     # 在面板切"停用内置搜索"时自动置 true；启动时重申，失败不影响启动
+takeover_search = false     # 在面板切"停用内置搜索"时自动置 true；启动后由后台核对兑现，失败不影响启动
 ```
 
 排查建议：如果搜索没结果，优先点面板里的**网络自检**（直连/代理双测 + 推荐链路 + 中文结论）；或看 `startup` 返回里的 `chain`（用户配置的）与 `effective_chain`（实际会用的，代理感知裁剪后）和 `system_proxy_detected`；再单独指定 `backend` 逐个试。想彻底不依赖第三方服务，就自建一个 SearXNG 并把 `backend_chain` 改成 `["searxng"]`。
