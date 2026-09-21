@@ -543,6 +543,13 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
                 </Inline>
                 <Text>{t("panel.guide.step1.line2")}</Text>
                 <Text>{t("panel.guide.step1.line3")}</Text>
+                <Accordion id="guide-step1-questions" title={t("panel.guide.step1.qAcc")} open={false}>
+                  <Text>{t("panel.guide.step1.qIntro")}</Text>
+                  <Text>{t("panel.guide.step1.q1")}</Text>
+                  <Text>{t("panel.guide.step1.q2")}</Text>
+                  <Text>{t("panel.guide.step1.q3")}</Text>
+                  <Text>{t("panel.guide.step1.qAfter")}</Text>
+                </Accordion>
               </Stack>
             </Step>
             <Step index="2" title={t("panel.guide.step2.title")}>
@@ -802,6 +809,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
             />
           </Inline>
           <Text>{hint}</Text>
+          <Text>{t("panel.host.manualTip")}</Text>
           {takeoverMismatch ? <Alert tone="warning">{t("panel.host.mismatch")}</Alert> : null}
           {takeoverError ? <Text>{t("panel.host.lastError", { detail: takeoverError })}</Text> : null}
           <Inline gap={3} wrap>
@@ -822,6 +830,9 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
           <Accordion id="host-cost" title={t("panel.host.accCost")} open={false}>
             <Text>{t("panel.host.impact")}</Text>
             <Text>{t("panel.host.tradeoff")}</Text>
+          </Accordion>
+          <Accordion id="host-manual" title={t("panel.host.accManual")} open={false}>
+            <Text>{t("panel.host.manualWhy")}</Text>
           </Accordion>
         </Stack>
       </Card>
