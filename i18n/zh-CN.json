@@ -1,6 +1,6 @@
 {
   "plugin.name": "更好的网络搜索",
-  "plugin.description": "不需要 API Key 的联网搜索与网页正文阅读，开箱即用；失败自动切换后端。自带面板新手引导（可一键填入 Exa 免费密钥）、内置搜索双向开关、代理软件兼容开关、网络自检，以及“最近一次搜索是哪一路答的”回看卡；也支持代理与自建 SearXNG。",
+  "plugin.description": "不需要任何 API Key 的联网搜索与网页正文阅读。开箱即用，失败自动换后端；自带面板新手引导（可填入多把 Exa 免费密钥，一把用完自动换下一把）、宿主内置搜索状态查看（停用它请在插件中心点一下）、代理软件兼容开关、网络自检，面板还能回看最近一次搜索是哪一路答的；支持代理与自建 SearXNG。",
 
   "panel.title": "更好的网络搜索",
   "panel.subtitle": "第一次用先看这里：注册 Exa 拿一把免费密钥，或者点「先体验」用免费额度先跑起来。",
@@ -45,7 +45,6 @@
   "panel.actions.cancel": "取消",
   "panel.actions.showGuide": "重新引导",
   "panel.actions.checkHost": "重新检查",
-  "panel.actions.retryStop": "重新停用",
   "panel.actions.runDiagnose": "开始自检",
   "panel.actions.refresh": "刷新面板",
 
@@ -61,9 +60,6 @@
   "panel.messages.fallbackFailed": "这次没写进去，再点一次。",
   "panel.messages.testLatency": "刚刚花了 {latency}",
   "panel.messages.testCount": "拿到 {count} 条结果",
-  "panel.messages.hostOn": "宿主内置的网络搜索已经开起来了。",
-  "panel.messages.hostOff": "宿主内置的网络搜索已经停掉，搜索交给本插件。",
-  "panel.messages.hostFailed": "内置网络搜索的状态没改动成功。",
   "panel.messages.hostChecked": "内置网络搜索现在是：{state}",
 
   "panel.errors.actionUnavailable": "这个操作现在点不动：请先启动本插件（或等它启动完成）再点。",
@@ -120,7 +116,7 @@
   "panel.last.help": "只记最近一次，重启插件就清空；面板不留关键词内容，只记字数。",
 
   "panel.host.title": "宿主内置「网络搜索」（强烈推荐停用）",
-  "panel.host.label": "停用内置「网络搜索」（由本插件接管）",
+  "panel.host.label": "宿主内置『网络搜索』当前状态",
   "panel.host.line": "停用后，对话里的搜索只走本插件这一路。",
   "panel.host.accWhy": "为什么推荐停用",
   "panel.host.accCost": "停用会少掉什么",
@@ -128,17 +124,14 @@
   "panel.host.gate": "「她有时不搜就凭记忆答」不是这里能管的：宿主自己有一道闸门先判断这句话要不要外部信息，判断不要就整个插件都不派发。停用能保证的是：一旦去搜，搜的就是这一路。",
   "panel.host.impact": "会少掉的只有两处宿主功能，都不关键：主动聊天的「窗口」信息源（默认就关着，要显式打开才有）拿不到资料；主动话题里带真实标题和链接的开场白退成普通提示。对话里的搜索、B 站 / YouTube / Twitch 的热搜与动态、一起看、梗和音乐素材都不受影响。",
   "panel.host.tradeoff": "所以：没开过「照我正在看的窗口主动搭话」就放心停用。之后想把内置开回来记一件事——宿主的搜索网关留着 5 分钟的失败冷却，刚开回来的头几分钟相关路径可能还是空的，不是没生效。",
-  "panel.host.help": "开关是意图，右边徽章才是实际状态。",
+  "panel.host.help": "这里只读状态；本插件不再代你开关它。",
+  "panel.host.stopHere": "它还在跑：请到宿主「插件中心」停用『网络搜索』，那样重启后也不会自启。",
   "panel.host.notFound": "没找到内置的网络搜索，可能已经被卸载；本插件不受影响。",
-  "panel.host.notToggleable": "当前环境不允许在这里改动，请到宿主的插件管理里手动开关。",
   "panel.host.stateRunning": "在跑",
   "panel.host.stateStopped": "已停",
   "panel.host.stateUnknown": "状态读不到",
-  "panel.host.mismatch": "你已选择接管，但内置还在跑（宿主答太慢）。本插件会在后台自动再确认，也可点「重新停用」。",
-  "panel.host.manualTip": "想更稳：到宿主的插件中心手动停用『网络搜索』，那条路不经过宿主接口。",
   "panel.host.accManual": "为什么手动停用更稳",
-  "panel.host.manualWhy": "面板上这个开关是替你去按宿主的本地管理接口。宿主正在重载插件列表的时候，那一按可能 8 秒以上才回话（真机见过）；这种时候本插件会在后台自动再确认，不需要你补点。想彻底避开这一路，就到宿主的插件中心里把『网络搜索』停用：那是宿主自己做的操作，还会顺手把「开机自启」一起写成关，重启后它也不会自己爬起来。两种做法效果一样、也不互相打架——你手动停好之后，本插件核对到它确实没在跑，就安静地认为接管已经完成。",
-  "panel.host.lastError": "上次停用的报错：{detail}",
+  "panel.host.manualWhy": "要停用请直接在宿主「插件中心」把『网络搜索』关掉：宿主自己做这一步，同时会把「开机自启」也写成关，重启后不会再起来。本插件不再代你按那个开关——那要调宿主的本地管理接口，宿主正在重载插件列表时那一按常常 8 秒以上才回话，回话之前谁都分不清是「没生效」还是「没答上」，结果就是把已经做成的事报成错误。这张卡只读：点「重新检查」就能看到它到底在不在跑。",
 
   "panel.diag.title": "网络自检",
   "panel.diag.help": "挨个试一遍各个搜索来源，告诉你直连能不能用、大概多久出结果。",

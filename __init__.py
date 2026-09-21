@@ -44,7 +44,6 @@ from plugin.sdk.plugin import (
     lifecycle,
     neko_plugin,
     plugin_entry,
-    timer_interval,
     ui,
 )
 
@@ -74,7 +73,7 @@ DEFAULT_CHAIN = ("exa", "anysearch", "bing", "baidu")
 
 # Config sections the plugin reads; missing sections fall back to defaults so a
 # v0.1 install (which only has [search]) keeps working untouched.
-CONFIG_SECTIONS = ("search", "net", "ui", "host")
+CONFIG_SECTIONS = ("search", "net", "ui")
 
 # fake-ip range trusted for DNS *results* of fetch targets (TUN proxy mode).
 # Literal-IP targets, metadata addresses, *.local etc. are still refused by
@@ -109,7 +108,7 @@ _MSG_POOL_SPENT = "Exa 密钥池全部限流或额度用尽：本次改用其它
 # _call_with_exa_keys. The wording must carry 超时/连不上 so the self-check still
 # reports it as a network problem rather than 反爬.
 _MSG_EXA_UNREACHABLE = "Exa 这次连不上（超时或网络不可达）：本次改用其它搜索来源，稍后会再试"
-_MSG_NO_HOST = "未能连接宿主管理接口，请到插件中心手动开关『网络搜索』"
+_MSG_NO_HOST = "未能读取宿主插件状态，请到插件中心确认『网络搜索』是否在运行"
 _QUOTA_NOTE = "每个账号每月刷新 $10 ≈ 1400 次；多填几把会自动轮流用，不填也能搜，只是匿名档慢且限额低"
 _ONBOARDING_HINT = (
     "主人，『更好的网络搜索』已经装好啦。请打开插件中心里的『联网搜索』面板："
@@ -176,12 +175,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
         # Last good host-status read: (monotonic stamp, state dict). The panel
         # refreshes after every action; re-asking the host each time added seconds.
         self._host_state_cache: Optional[tuple] = None
-        # Why the latest "停用内置搜索" attempt failed, surfaced on the panel so a
-        # slow host answer is not silently swallowed into a log line.
-        self._takeover_error: str = ""
-        # "The user asked for the built-in off and we have not proven it yet." Set
-        # by startup and by a failed toggle; cleared by the status read in the tick.
-        self._takeover_pending: bool = False
         # The one search the user just asked about, shaped for the panel. Only
         # counts, timings and backend names -- never the query text.
         self._last_search: Optional[Dict[str, Any]] = None
@@ -191,7 +184,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
     # ------------------------------------------------------------------
 
     async def _load_sections(self) -> None:
-        """Read [search] [net] [ui] [host] from the host's merged config."""
+        """Read [search] [net] [ui] from the host's merged config."""
         # 8s, not the SDK's 5.0 default: this read is also the read-back that
         # settles whether a lost-acknowledgement write actually landed, so it is
         # correctness-critical and must outlive a slow host.
@@ -391,7 +384,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             order, effective, self._text("proxy", "auto"), proxies_present,
             bool(self._text("anysearch_api_key")), len(self._exa_keys()),
         )
-        self._arm_host_takeover()
         await self._maybe_send_first_run_notice()
         payload = {
             "status": "running",
@@ -418,7 +410,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
         return Ok({"status": "stopped"})
 
     # ------------------------------------------------------------------
-    # host takeover + first-run onboarding (both must never fail startup)
+    # first-run onboarding (must never fail startup)
     # ------------------------------------------------------------------
 
     def _safe_report_status(self, payload: Dict[str, Any]) -> None:
@@ -426,51 +418,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             self.report_status(payload)
         except Exception:  # status reporting is best-effort, never fatal
             self.logger.exception("report_status failed (ignored)")
-
-    def _arm_host_takeover(self) -> None:
-        """Note that the user opted into "built-in search off" (plan §1.5).
-
-        Deliberately not awaited from ``startup``: the host can hold
-        ``/plugin/web_search/stop`` behind its own registry reload for 8+ seconds
-        -- measured on a packaged host, which applied the change and answered at
-        exactly the moment our client gave up. Blocking there burned most of the
-        10 s startup budget (which ``config_change`` reuses) and reported a change
-        that *had* landed as "未能连接宿主管理接口", pushing the user to click around
-        the plugin centre for something that was already done.
-        """
-        if not self._flag_in("host", "takeover_search", False):
-            self._takeover_pending = False
-            self._takeover_error = ""
-            return
-        self._takeover_pending = True
-
-    @timer_interval(id="host_takeover", seconds=20, name="兑现停用内置搜索")
-    async def watch_host_takeover(self, **_):
-        """Prove the built-in search is stopped, and ask again until it is.
-
-        The status read decides, not the POST's reply: a late answer whose change
-        landed is success, and a host that is merely busy gets retried on the next
-        tick instead of being reported as unreachable.
-        """
-        if not self._takeover_pending or not self._flag_in("host", "takeover_search", False):
-            return Ok({"pending": False})
-
-        state = await asyncio.to_thread(self._host_search_state_sync, 4.0)
-        self._remember_host_state(state)
-        if state.get("error"):
-            self._takeover_error = str(state["error"])
-            self.logger.info("host takeover still pending: {}", self._takeover_error)
-            return Ok({"pending": True, "checked": False})
-        if not state.get("running"):
-            self._takeover_pending = False
-            self._takeover_error = ""
-            self.logger.info("host takeover confirmed: builtin web_search is not running")
-            return Ok({"pending": False, "confirmed": True})
-
-        ok, message = await asyncio.to_thread(self._host_set_enabled_sync, False)
-        self._takeover_error = "" if ok else message
-        self.logger.info("host takeover re-asserted: ok={} message={}", ok, message)
-        return Ok({"pending": True, "sent": ok})
 
     async def _maybe_send_first_run_notice(self) -> None:
         """Let the cat-girl introduce the panel, exactly once per install.
@@ -1135,16 +1082,10 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "host_search": {
                 "exists": bool(host_search.get("exists")),
                 "running": bool(host_search.get("running")),
-                "toggleable": bool(host_search.get("toggleable", True)),
             },
             "ssrf_fake_ip": bool(self._ssrf_ranges()),
             "key_fallback": self._flag_in("search", "exa_key_fallback_anonymous", False),
             "quota_note": _QUOTA_NOTE,
-            # The switch position comes from these two, never from the live badge:
-            # tying it to host_search.running made a confirming second click mean
-            # "start the built-in back up".
-            "takeover": self._flag_in("host", "takeover_search", False),
-            "takeover_error": getattr(self, "_takeover_error", ""),
             "last_search": dict(getattr(self, "_last_search", None) or {}),
         }
 
@@ -1157,14 +1098,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
             control = self._host_control(timeout)
             return control.status(_host.BUILTIN_SEARCH_PLUGIN_ID).as_context_dict()
         except Exception:
-            return {"exists": False, "running": False, "toggleable": True,
-                    "error": _MSG_NO_HOST}
-
-    def _host_set_enabled_sync(self, enabled: bool) -> tuple[bool, str]:
-        # 8s, not the old 4s: the host has been observed answering /stop and
-        # PLUGIN_NOT_RUNNING just past the 4 s mark, which used to be reported as
-        # "未能连接宿主管理接口" and pushed users to click the switch again.
-        return self._host_control(8.0).set_enabled(_host.BUILTIN_SEARCH_PLUGIN_ID, enabled)
+            return {"exists": False, "running": False, "error": _MSG_NO_HOST}
 
     def _cached_host_state(self) -> Optional[Dict[str, Any]]:
         """The last good host-status read, while it is still fresh."""
@@ -1430,58 +1364,12 @@ class BetterWebSearchPlugin(NekoPluginBase):
                        + ("" if tested == len(pool) else f"（另有 {len(pool) - tested} 把未测）"),
         })
 
-    @ui.action(label="停用/启用内置搜索", icon="🔀", group="host", order=10, refresh_context=True)
-    @plugin_entry(
-        id="set_host_search",
-        name="切换宿主内置搜索",
-        description="仅供面板调用：开启/关闭宿主内置的 web_search 插件（走宿主公开管理接口，"
-                    "只能操作 web_search 这一个插件）。",
-        timeout=15.0,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "enabled": {"type": "boolean", "description": "true=启用内置搜索，false=停用"},
-            },
-            "required": ["enabled"],
-        },
-    )
-    async def set_host_search(self, enabled: bool = False, **_):
-        want = bool(enabled)
-        # Store the intent first, whatever the host then answers: the panel switch
-        # mirrors this value, so a slow or failed management call must never snap
-        # the control back to "not taken over" -- the next click would then mean
-        # the opposite of what the user is trying to confirm (that is exactly how
-        # a stopped built-in got started again on the reporting machine).
-        await self._persist({"host": {"takeover_search": not want}})
-        self._host_state_cache = None          # the refresh after this must be live
-        try:
-            # Sync loopback HTTP -> worker thread; never blocks the plugin loop.
-            ok, message = await asyncio.to_thread(self._host_set_enabled_sync, want)
-            if not ok:
-                # A late answer is not a failure: the host can apply the change and
-                # reply after our timeout -- exactly what the startup path measured.
-                # 8 s for the write + 4 s for the read still fits this entry's 15 s.
-                state = await asyncio.to_thread(self._host_search_state_sync, 4.0)
-                self._remember_host_state(state)
-                if not state.get("error") and bool(state.get("running")) is want:
-                    ok = True
-                    message = _host.MESSAGE_STARTED if want else _host.MESSAGE_STOPPED
-        except Exception as error:
-            self.logger.info("host toggle failed: {}:{}", type(error).__name__, error)
-            ok, message = False, _MSG_NO_HOST
-        # What the switch promises is "the built-in is off", not "one POST was
-        # acknowledged in time". Unproven goes to the tick, not to a red message.
-        self._takeover_pending = bool(not ok and not want)
-        self._takeover_error = "" if ok else message
-        self.logger.info("host search toggle: want_enabled={} ok={}", want, ok)
-        return Ok({"ok": ok, "message": message, "takeover": not want,
-                   "running": want if ok else None})
-
     @ui.action(label="查询内置搜索状态", icon="🩺", group="host", order=20, refresh_context=False)
     @plugin_entry(
         id="get_host_search",
         name="查询宿主内置搜索状态",
-        description="仅供面板调用：读取宿主内置 web_search 插件是否存在/在跑。",
+        description="仅供面板调用：读取宿主内置 web_search 插件是否存在/在跑。"
+                    "本插件不代替用户开关它，停用请去宿主的插件中心。",
         timeout=10.0,
         input_schema={"type": "object", "properties": {}},
     )
@@ -1496,7 +1384,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "ok": not bool(error),
             "exists": bool(state.get("exists")),
             "running": running,
-            "toggleable": bool(state.get("toggleable", True)),
             "message": error or ("内置『网络搜索』正在运行" if running
                                  else "内置『网络搜索』未在运行"),
         })

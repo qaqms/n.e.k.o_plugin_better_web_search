@@ -1,6 +1,6 @@
 {
   "plugin.name": "Better Web Search",
-  "plugin.description": "Keyless web search and page reading. Works out of the box and falls back across several free backends. Ships a setup panel (optional one-paste Exa free API key), a two-way switch for the host's built-in search, a proxy-software compatibility toggle, a network self-check, and a card showing which backend answered your last search; also supports proxies and your own SearXNG.",
+  "plugin.description": "Web search and page reading with no API key required. Works out of the box, switches backend on failure; a beginner guide in the panel (add several free Exa keys and the plugin rotates them when one runs out), a read-only view of the host's built-in search (stop it in the Plugin Centre), proxy-compatibility switches, a network self-check, and a card showing which route answered your last search. Proxies and self-hosted SearXNG supported.",
 
   "panel.title": "Better Web Search",
   "panel.subtitle": "First time here? Register at Exa for a free key, or tap \"Try the free way\" and start searching right away.",
@@ -45,7 +45,6 @@
   "panel.actions.cancel": "Cancel",
   "panel.actions.showGuide": "Show guide again",
   "panel.actions.checkHost": "Check again",
-  "panel.actions.retryStop": "Stop it again",
   "panel.actions.runDiagnose": "Run the check",
   "panel.actions.refresh": "Refresh panel",
 
@@ -61,9 +60,6 @@
   "panel.messages.fallbackFailed": "That did not get written. Tap it again.",
   "panel.messages.testLatency": "Took {latency}",
   "panel.messages.testCount": "Got {count} results",
-  "panel.messages.hostOn": "The built-in web search is running again.",
-  "panel.messages.hostOff": "The built-in web search is stopped; this plugin handles searching now.",
-  "panel.messages.hostFailed": "The built-in web search state could not be changed.",
   "panel.messages.hostChecked": "Built-in web search is now: {state}",
 
   "panel.errors.actionUnavailable": "This cannot be clicked right now: start this plugin first (or wait for it to finish starting) and try again.",
@@ -127,18 +123,15 @@
   "panel.host.gate": "\"Sometimes she answers from memory without searching\" is not decided here: the host runs its own gate first to judge whether the turn needs outside information, and when it says no, no plugin is dispatched at all. What stopping the built-in guarantees is that when she does search, it is this route.",
   "panel.host.impact": "Only two host features get dropped, and neither is load-bearing: the \"window\" source for proactive chat (off by default — you have to turn it on) loses its material, and proactive topic openers fall back to the plain hint instead of real titles and links. Searching in conversation, Bilibili / YouTube / Twitch trends and feeds, watch-together, and meme and music material are all unaffected.",
   "panel.host.tradeoff": "So: unless you turned on \"talk to me about the window I'm looking at\", stop the built-in with a clear conscience. One thing to know if you turn it back on later: the host's search gateway keeps a 5-minute failure cooldown, so for a few minutes after re-enabling, those paths may still come back empty. That is the cooldown, not a failed toggle.",
-  "panel.host.label": "Stop the built-in \"web search\" (this plugin takes over)",
-  "panel.host.help": "The switch is your intent; the badge is what is actually true.",
+  "panel.host.label": "Host's built-in \"web search\": current state",
+  "panel.host.help": "Read-only here; this plugin no longer flips that switch for you.",
+  "panel.host.stopHere": "Still running: stop \"Web Search\" in the host's Plugin Centre, which also keeps it from starting on boot.",
   "panel.host.notFound": "The built-in web search was not found — it may have been removed. This plugin is unaffected.",
-  "panel.host.notToggleable": "This environment does not allow changing it here. Use the plugin manager in the host instead.",
   "panel.host.stateRunning": "Running",
   "panel.host.stateStopped": "Stopped",
   "panel.host.stateUnknown": "State unavailable",
-  "panel.host.mismatch": "You asked for the takeover, but the built-in is still running (the host answered too late). This plugin re-checks it in the background; you can also tap \"Stop it again\".",
-  "panel.host.manualTip": "For the steadiest setup: stop \"Web Search\" in the host's Plugin Centre too — that path skips the host API.",
   "panel.host.accManual": "Why manual is steadier",
-  "panel.host.manualWhy": "The switch here presses the host's local management API on your behalf. While the host is reloading its plugin list that press can take 8+ seconds to be answered (seen on a real machine); when that happens this plugin re-checks in the background, so there is nothing for you to click again. To avoid that path entirely, stop \"Web Search\" in the host's Plugin Centre: the host does it itself and also writes \"start on boot\" to off, so it stays stopped after a restart. Both ways end in the same place and do not fight each other — once you stop it by hand, this plugin sees that it is not running and quietly considers the takeover done.",
-  "panel.host.lastError": "Last stop attempt reported: {detail}",
+  "panel.host.manualWhy": "To stop it, turn \"Web Search\" off in the host's Plugin Centre itself: the host performs the step and also writes \"start on boot\" to off, so it stays stopped after a restart. This plugin no longer presses that switch for you -- that meant POSTing the host's local management API, and while the host is reloading its plugin list a press can take 8+ seconds to be answered. Until it answers, nobody can tell \"it did not work\" from \"it worked and replied late\", so changes that had landed got reported as errors. This card only reads: press \"Check again\" to see whether it is running.",
 
   "panel.diag.title": "Network check",
   "panel.diag.help": "Tries each search source one by one and tells you what works directly and how long it takes.",

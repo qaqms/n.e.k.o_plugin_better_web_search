@@ -1,13 +1,13 @@
-"""Offline tests for the host toggle. No socket is ever opened: ``_net.request`` is faked.
+"""Offline tests for the host status read. No socket is ever opened: ``_net.request`` is faked.
 
-The shapes asserted here are the ones read out of the host source:
+The shape asserted here is the one read out of the host source:
 
 * ``GET /plugin/status?plugin_id=x`` -> ``{"plugin_id", "status": {"status": "running|stopped|crashed"},
   "updated_at", "source", "time"}`` (``plugin/core/status.py`` + ``query_service.py:574``).
-* ``POST /plugin/x/stop`` -> ``{"success": true, "plugin_id", "message"}``; when nothing runs it is
-  ``404`` + ``X-Error-Code: PLUGIN_NOT_RUNNING`` (``lifecycle_service.py:1401-1410``).
-* ``POST /plugin/x/start`` while running -> ``success=True`` with ``message``
-  ``"Plugin is already running"`` (``lifecycle_service.py:889-897``).
+
+There is deliberately nothing about ``POST /plugin/x/start|stop`` in this file: a
+user plugin pressing that switch reported changes that had landed as failures, so
+the write path was removed (see ``test_the_client_has_no_write_route``).
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import socket
 import sys
 import types
 import urllib.request
+from pathlib import Path
 
 import conftest
 import pytest
@@ -26,6 +27,7 @@ host = conftest.load("_host")
 net = conftest.load("_net")
 
 PID = "web_search"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 @pytest.fixture(autouse=True)
@@ -105,37 +107,36 @@ def http_error(status: int, code: str = "") -> Exception:
 @pytest.mark.parametrize("pid", ["web_fetch", "WEB_SEARCH", "web_search ", "", " lifekit",
                                  "web_search/../memo", "game_agent_minecraft", None, 0, ["web_search"]])
 def test_only_the_whitelisted_plugin_id_is_accepted(monkeypatch, pid: object) -> None:
-    control_obj, rec = control(monkeypatch, json_response({"success": True}))
-    with pytest.raises(ValueError):
-        control_obj.set_enabled(str(pid) if pid is not None else "", True)
+    control_obj, rec = control(monkeypatch)
     with pytest.raises(ValueError):
         control_obj.status(str(pid) if pid is not None else "")
     assert rec.count == 0
     assert host.ALLOWED_PLUGIN_IDS == frozenset({"web_search"})
 
 
-def test_the_whitelist_is_immutable_at_runtime() -> None:
-    assert isinstance(host.ALLOWED_PLUGIN_IDS, frozenset)
-    with pytest.raises((AttributeError, TypeError)):
-        host.ALLOWED_PLUGIN_IDS.add("lifekit")  # type: ignore[attr-defined]
+def test_the_client_has_no_write_route() -> None:
+    """No start/stop is reachable from this module -- the user does that in 插件中心.
 
-
-# --- loopback must never be proxied ---------------------------------------
+    Guarded at source level on purpose: ``set_enabled`` was the single call that
+    made this plugin report a landed change as "未能连接宿主管理接口" (19 logged
+    failures on a real install, v0.2.0 through v0.9.6, none of them real), and a
+    half-restored write path would keep every test here green.
+    """
+    source = (ROOT / "_host.py").read_text(encoding="utf-8")
+    assert "def set_enabled" not in source
+    assert '_call("POST' not in source
+    assert not hasattr(host.HostPluginControl, "set_enabled")
 
 
 def test_every_request_uses_policy_none_and_no_proxy_url(monkeypatch) -> None:
     control_obj, rec = control(
         monkeypatch,
         json_response({"plugin_id": PID, "status": {"status": "running"}, "source": "main_process_synthetic"}),
-        json_response({"success": True, "plugin_id": PID, "message": "Plugin stopped successfully"}),
-        json_response({"success": True, "plugin_id": PID, "message": "Plugin started successfully"}),
     )
 
     control_obj.status(PID)
-    control_obj.set_enabled(PID, False)
-    control_obj.set_enabled(PID, True)
 
-    assert rec.count == 3
+    assert rec.count == 1
     for method, url, kwargs in rec.calls:
         assert kwargs["policy"] == "none"
         assert kwargs["policy"] == net.POLICY_NONE
@@ -144,9 +145,12 @@ def test_every_request_uses_policy_none_and_no_proxy_url(monkeypatch) -> None:
     assert rec.calls[0][0] == "GET"
     assert rec.calls[0][1].endswith("/plugin/status")
     assert rec.calls[0][2]["params"] == {"plugin_id": PID}
-    assert rec.calls[1][0] == "POST"
-    assert rec.calls[1][1].endswith("/plugin/web_search/stop")
-    assert rec.calls[2][1].endswith("/plugin/web_search/start")
+
+
+def test_the_whitelist_is_immutable_at_runtime() -> None:
+    assert isinstance(host.ALLOWED_PLUGIN_IDS, frozenset)
+    with pytest.raises((AttributeError, TypeError)):
+        host.ALLOWED_PLUGIN_IDS.add("lifekit")  # type: ignore[attr-defined]
 
 
 # --- status reading -------------------------------------------------------
@@ -164,7 +168,7 @@ def test_status_reads_the_host_synthetic_record(monkeypatch) -> None:
     state = control_obj.status(PID)
     assert (state.exists, state.running) == (True, False)
     assert state.raw["status"]["status"] == "stopped"
-    assert state.as_context_dict() == {"exists": True, "running": False, "toggleable": True, "error": ""}
+    assert state.as_context_dict() == {"exists": True, "running": False, "error": ""}
 
 
 def test_status_accepts_a_reported_status_payload(monkeypatch) -> None:
@@ -219,120 +223,37 @@ def test_status_of_an_empty_but_wellformed_record_is_not_running(monkeypatch) ->
     assert state.error == ""
 
 
-# --- idempotent switching -------------------------------------------------
-
-
-def test_stop_of_a_stopped_plugin_is_success(monkeypatch) -> None:
-    # lifecycle_service.py:1401-1410 -> 404 + X-Error-Code: PLUGIN_NOT_RUNNING,
-    # and _net throws the body away, so both the bare 404 and the coded one must pass.
-    for error in (http_error(404), http_error(404, "PLUGIN_NOT_RUNNING")):
-        control_obj, _ = control(monkeypatch, error)
-        assert control_obj.set_enabled(PID, False) == (True, host.MESSAGE_STOPPED)
-
-
-def test_stop_of_a_stopped_plugin_recognises_a_coded_200(monkeypatch) -> None:
-    control_obj, _ = control(monkeypatch, json_response({"detail": "Plugin 'web_search' is not running"},
-                                                        headers={"X-Error-Code": "PLUGIN_NOT_RUNNING"}))
-    assert control_obj.set_enabled(PID, False) == (True, host.MESSAGE_STOPPED)
-
-
-def test_start_of_a_running_plugin_is_success(monkeypatch) -> None:
-    # lifecycle_service.py:889-897 -> success=True, message "Plugin is already running".
-    control_obj, _ = control(monkeypatch, json_response({"success": True, "plugin_id": PID,
-                                                         "message": "Plugin is already running"}))
-    assert control_obj.set_enabled(PID, True) == (True, host.MESSAGE_STARTED)
-
-
-def test_plain_stop_and_start_successes_use_the_canned_copy(monkeypatch) -> None:
-    control_obj, _ = control(
-        monkeypatch,
-        json_response({"success": True, "plugin_id": PID, "message": "Plugin stopped successfully"}),
-        json_response({"success": True, "plugin_id": PID, "message": "Plugin started successfully"}),
-    )
-    assert control_obj.set_enabled(PID, False) == (True, host.MESSAGE_STOPPED)
-    assert control_obj.set_enabled(PID, True) == (True, host.MESSAGE_STARTED)
-
-
-def test_explicit_failure_flag_is_reported_as_a_failure(monkeypatch) -> None:
-    control_obj, _ = control(monkeypatch, json_response({"success": False, "message": "boom at /some/path"}))
-
-    ok, message = control_obj.set_enabled(PID, True)
-    assert ok is False
-    assert "boom" not in message
-    assert "/some/path" not in message
-    assert message == host.MESSAGE_FAILED
-
-
-def test_busy_lock_is_retryable_copy(monkeypatch) -> None:
-    control_obj, _ = control(monkeypatch, http_error(409, "PLUGIN_OPERATION_BUSY"))
-
-    ok, message = control_obj.set_enabled(PID, False)
-    assert ok is False
-    assert message.startswith(host.MESSAGE_BUSY)
-
-
-def test_start_of_an_unknown_plugin_asks_for_the_plugin_centre(monkeypatch) -> None:
-    control_obj, _ = control(monkeypatch, http_error(404))
-
-    ok, message = control_obj.set_enabled(PID, True)
-    assert ok is False
-    assert message == host.MESSAGE_NOT_FOUND
-
-
 # --- failure normalisation ------------------------------------------------
 
 
 def test_network_failure_is_chinese_and_leaks_nothing(monkeypatch) -> None:
-    raw = "网络不可达: [Errno 111] Connection refused http://127.0.0.1:48916/plugin/web_search/stop Traceback"
-    for attempt in range(2):
-        control_obj, _ = control(monkeypatch, net.NetworkError(raw))
-        if attempt:
-            ok, message = control_obj.set_enabled(PID, False)
-            assert ok is False
-        else:
-            state = control_obj.status(PID)
-            assert (state.exists, state.running) == (False, False)
-            message = state.error
-            ok = False
-        assert message == host.MESSAGE_UNREACHABLE
-        assert ok is False
-        for forbidden in ("http", "127.0.0.1", "Traceback", "Errno", "48916"):
-            assert forbidden not in message
+    raw = "网络不可达: [Errno 111] Connection refused http://127.0.0.1:48916/plugin/status Traceback"
+    control_obj, _ = control(monkeypatch, net.NetworkError(raw))
+    state = control_obj.status(PID)
+    assert (state.exists, state.running) == (False, False)
+    assert state.error == host.MESSAGE_UNREACHABLE
+    for forbidden in ("http", "127.0.0.1", "Traceback", "Errno", "48916"):
+        assert forbidden not in state.error
 
 
-def test_a_write_that_outlived_its_timeout_says_slow_not_unreachable(monkeypatch) -> None:
-    """The host can apply /stop and answer after our client gave up (measured).
-
-    Calling that "未能连接宿主管理接口，请到插件中心手动停止" sends the user to fix
-    something that is already fixed; the copy has to say it is slow and that the
-    plugin will re-check.
-    """
-    for attempt in range(2):
-        control_obj, _ = control(monkeypatch, net.NetworkError("请求超时"))
-        if attempt:
-            ok, message = control_obj.set_enabled(PID, False)
-            assert ok is False
-        else:
-            state = control_obj.status(PID)
-            message = state.error
-        assert message == host.MESSAGE_SLOW
-        assert "自动再确认" in message
-        for forbidden in ("http", "127.0.0.1", "Traceback", "Errno"):
-            assert forbidden not in message
+def test_a_status_read_that_times_out_says_slow_not_unreachable(monkeypatch) -> None:
+    """A host that is mid-reload answers late; "slow" and "absent" are different advice."""
+    control_obj, _ = control(monkeypatch, net.NetworkError("请求超时"))
+    state = control_obj.status(PID)
+    assert state.error == host.MESSAGE_SLOW
+    assert "稍后再点一次" in state.error
+    for forbidden in ("http", "127.0.0.1", "Traceback", "Errno"):
+        assert forbidden not in state.error
 
 
 def test_unexpected_exception_never_escapes(monkeypatch) -> None:
     class Boom(RuntimeError):
         pass
 
-    control_obj, _ = control(monkeypatch, Boom("secret /internal/path http://127.0.0.1:1"),
-                             Boom("secret /internal/path http://127.0.0.1:1"))
+    control_obj, _ = control(monkeypatch, Boom("secret /internal/path http://127.0.0.1:1"))
     state = control_obj.status(PID)
     assert state.exists is False and state.running is False
     assert "secret" not in state.error
-    ok, message = control_obj.set_enabled(PID, True)
-    assert ok is False
-    assert "secret" not in message
 
 
 def test_http_error_on_status_is_normalised(monkeypatch) -> None:
@@ -475,11 +396,12 @@ def test_timeout_defaults_and_guards(monkeypatch) -> None:
 
 
 def test_no_global_mutable_state_between_instances(monkeypatch) -> None:
-    control_obj, rec = control(monkeypatch, json_response({"success": True}))
+    control_obj, rec = control(
+        monkeypatch, json_response({"plugin_id": PID, "status": {"status": "running"}, "source": "x"}))
     other = host.HostPluginControl("http://127.0.0.1:48917")
 
-    control_obj.set_enabled(PID, False)
-    assert [call[1] for call in rec.calls] == ["http://127.0.0.1:48916/plugin/web_search/stop"]
+    control_obj.status(PID)
+    assert [call[1] for call in rec.calls] == ["http://127.0.0.1:48916/plugin/status"]
     assert other.base_url == "http://127.0.0.1:48917"
 
 

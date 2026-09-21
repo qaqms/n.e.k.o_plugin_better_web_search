@@ -1,34 +1,30 @@
-"""Talk to the host's own plugin-management API so the built-in search can be switched off.
+"""Read the host's own plugin-management API to see whether the built-in search runs.
 
 Two search plugins exposed to the model at the same time is confusing and wasteful:
 the model may pick the built-in ``web_search`` and the user pays for a backend we
-do not control. This module gives the panel a single, auditable toggle.
+do not control. Stopping it is the user's own click in the plugin centre -- this
+module only *reads* the result, because writing was measured to be unreliable from
+here (see below).
 
 Why loopback HTTP instead of importing the host's ``PluginLifecycleService``:
 
 * **Process boundary.** A user plugin runs in its *own* subprocess. The live
   registry (``plugin.core.state.state.plugin_hosts``) is a plain module-level
   dict inside the host process, so an imported service object here would see an
-  empty local copy: ``stop_plugin`` would answer ``PLUGIN_NOT_RUNNING`` for a
-  plugin that is very much alive, and ``start_plugin`` would fork an orphan
-  process that nobody supervises or shuts down.
-* **The host caches what it believes is running.** ``stop`` persists
-  ``enabled=false`` + ``auto_start=false`` to ``plugin_runtime_overrides.json``,
-  but the host keeps its in-memory host object and its registered LLM tools
-  until *its own* lifecycle code tears them down. Writing that JSON from the
-  outside would leave the built-in search answering tool calls for the rest of
-  the session, and the next host restart would read a preference nobody
-  validated. The HTTP route runs the real teardown (process stop, event-handler
-  removal, remote LLM-tool cleanup) and records the intent in one transaction.
-* **No privileged surface is needed.** These are the endpoints the official
-  plugin centre already calls, and ``require_admin`` is a no-op dependency, so
-  this stays inside the host's public contract instead of touching host files
-  (which are read-only for a distributed plugin anyway).
+  empty local copy and report a plugin that is very much alive as absent.
+* **No privileged surface is needed.** ``/plugin/status`` is one of the endpoints
+  the official plugin centre already calls, and ``require_admin`` is a no-op
+  dependency, so this stays inside the host's public contract instead of touching
+  host files (which are read-only for a distributed plugin anyway).
 
-Both directions work: ``/start`` applies ``enabled=true`` before starting even
-when the persisted override says disabled, and ``/stop`` on a plugin that is not
-running answers ``404 PLUGIN_NOT_RUNNING`` -- which *is* the desired end state,
-so it is treated as success rather than an error.
+Why this module stopped at reading: ``POST /plugin/web_search/stop`` has been
+observed sitting behind the host's own registry reload for 8+ seconds and answering
+*after* our client gave up -- while the change had in fact landed. A plugin cannot
+tell "slow acknowledgement" from "failed", so every attempt looked like a broken
+toggle, and the retry path (a 20 s background tick) had to disarm itself once it had
+confirmed, which left a built-in that came back later never re-stopped. The status
+read ``GET /plugin/status`` is cheap by comparison: it is served from in-process
+caches (``plugin/core/status.py:79-113``).
 
 Every request is loopback-only and must never be proxied, so they all go out
 through :func:`_net.request` with ``policy=_net.POLICY_NONE``.
@@ -45,8 +41,8 @@ from typing import Any
 
 from . import _net
 
-# Hard whitelist. Nothing else may be stopped or started through this module,
-# even if a future prompt-injection convinces the model to name another plugin.
+# Hard whitelist. Nothing else may be read through this module, even if a future
+# prompt-injection convinces the model to name another plugin.
 ALLOWED_PLUGIN_IDS = frozenset({"web_search"})
 
 # Convenience constant for the panel: the only plugin this module exists to flip.
@@ -66,20 +62,13 @@ CODE_OPERATION_BUSY = "PLUGIN_OPERATION_BUSY"
 
 # User-facing copy: plain Chinese a beginner can act on. Never interpolate a raw
 # exception string here -- it can carry URLs and internal paths.
-MESSAGE_STOPPED = "内置『网络搜索』已停用，搜索将由本插件提供"
-MESSAGE_STARTED = "内置『网络搜索』已启用，若想让本插件独占搜索，请再次点击停用"
-MESSAGE_UNREACHABLE = "未能连接宿主管理接口，请到插件中心手动停止『网络搜索』"
-# Measured on a packaged host: /plugin/<id>/stop can sit behind the registry
-# reload for 8+ seconds after a plugin starts, then answer late. That is not a
-# connectivity problem, and telling the user to go click around the plugin centre
-# while the request is merely slow is how the toggle got pressed twice.
-MESSAGE_SLOW = ("宿主管理接口这次回答太慢（多半正在重载插件列表），"
-                "本插件会在后台自动再确认，不用手动点")
+MESSAGE_UNREACHABLE = "未能连上宿主管理接口，稍后再点一次「查状态」，或直接到插件中心确认『网络搜索』"
+# Measured on a packaged host: a management request can sit behind the registry
+# reload for 8+ seconds after a plugin starts and answer late, so "no answer in
+# time" says nothing about whether anything changed.
+MESSAGE_SLOW = "宿主管理接口这次回答太慢（多半正在重载插件列表），稍后再点一次「查状态」"
 MESSAGE_STATUS_FAILED = "未能读取宿主插件状态，请到插件中心确认『网络搜索』是否在运行"
-MESSAGE_BUSY = "宿主正在处理其它插件操作，请稍等几秒后再试一次"
-MESSAGE_NOT_FOUND = "宿主里没有可切换的内置『网络搜索』，请确认宿主版本"
-MESSAGE_BAD_RESPONSE = "宿主管理接口返回了无法识别的内容，请到插件中心手动切换『网络搜索』"
-MESSAGE_FAILED = "切换未成功，请到插件中心手动开关『网络搜索』"
+MESSAGE_BAD_RESPONSE = "宿主管理接口返回了无法识别的内容，请到插件中心确认『网络搜索』是否在运行"
 
 _RUNNING_TOKENS = frozenset({
     "running", "started", "start", "active", "online", "alive",
@@ -92,10 +81,6 @@ _STOPPED_TOKENS = frozenset({
 })
 _LIVENESS_KEYS = ("running", "is_running", "alive", "is_alive", "enabled_and_running")
 _STATE_KEYS = ("status", "state", "phase", "lifecycle_state")
-# Substrings the host uses when the requested state already holds. Kept free of
-# the word "is" on purpose: they are matched case-folded against ``message``.
-_ALREADY_RUNNING_MARKERS = ("already running", "already_started", "already running.")
-_NOT_RUNNING_MARKERS = ("not running", "no host object")
 _OK_STATUSES = (200, 201, 202, 204)
 
 
@@ -119,7 +104,6 @@ class HostPluginState:
         return {
             "exists": bool(self.exists),
             "running": bool(self.running),
-            "toggleable": self.plugin_id in ALLOWED_PLUGIN_IDS,
             "error": self.error,
         }
 
@@ -359,22 +343,6 @@ def _header_of(response: Any, name: str) -> str:
         return ""
 
 
-def _failure_hint(status: int, code: str, want_on: bool) -> str:
-    """Map a host error onto copy a beginner can follow."""
-    clean_code = _as_text(code).strip()[:64]
-    if status == 404:
-        if want_on and clean_code == CODE_NOT_RUNNING:
-            return MESSAGE_STARTED
-        if want_on:
-            return MESSAGE_NOT_FOUND
-        return MESSAGE_STOPPED
-    if status == 409 or clean_code == CODE_OPERATION_BUSY:
-        return _with_code(MESSAGE_BUSY, clean_code)
-    if status == 0:
-        return MESSAGE_UNREACHABLE
-    return _with_code(MESSAGE_FAILED, clean_code)
-
-
 def _with_code(message: str, code: str) -> str:
     cleaned = "".join(char for char in _as_text(code) if 32 < ord(char) < 127)[:48]
     if not cleaned:
@@ -391,19 +359,19 @@ def _check_plugin_id(plugin_id: Any) -> str:
     value = plugin_id if isinstance(plugin_id, str) else ""
     if value not in ALLOWED_PLUGIN_IDS:
         raise ValueError(
-            f"refusing to control host plugin {value!r}: only {sorted(ALLOWED_PLUGIN_IDS)} "
-            "may be toggled by this plugin"
+            f"refusing to read host plugin {value!r}: only {sorted(ALLOWED_PLUGIN_IDS)} "
+            "is reported on by this plugin"
         )
     return value
 
 
 class HostPluginControl:
-    """Synchronous, stateless client for ``/plugin/*`` on the host's loopback API.
+    """Synchronous, stateless client for ``/plugin/status`` on the host's loopback API.
 
-    ``status`` and ``set_enabled`` normalise *every* operational failure into a
-    value the panel can print directly: a ``(ok, 中文说明)`` tuple, or a
-    :class:`HostPluginState` whose ``raw`` carries ``error``. The only exception
-    that escapes is :class:`ValueError` for a non-whitelisted plugin id.
+    ``status`` normalises *every* operational failure into a value the panel can
+    print directly: a :class:`HostPluginState` whose ``raw`` carries ``error``. The
+    only exception that escapes is :class:`ValueError` for a non-whitelisted plugin
+    id.
     """
 
     def __init__(self, base_url: str = "", timeout: float = DEFAULT_TIMEOUT_SECONDS) -> None:
@@ -472,52 +440,6 @@ class HostPluginControl:
         else:
             hint = MESSAGE_UNREACHABLE
         return HostPluginState(plugin_id, False, False, {"error": hint})
-
-    # -- writes
-
-    def set_enabled(self, plugin_id: str, enabled: bool) -> tuple[bool, str]:
-        """Start or stop a whitelisted host plugin; returns ``(ok, 中文说明)``."""
-        pid = _check_plugin_id(plugin_id)
-        want_on = bool(enabled)
-        action = "start" if want_on else "stop"
-        try:
-            response = self._call("POST", f"/plugin/{pid}/{action}")
-        except Exception as error:
-            return self._write_failure(error, want_on)
-
-        payload = _parse_object(getattr(response, "body", b""))
-        status = _status_of(response)
-        code = _error_code_of(payload, _header_of(response, "X-Error-Code"))
-        message = _message_of(payload)
-        if status not in _OK_STATUSES:
-            return False, _failure_hint(status, code, want_on)
-
-        if code == CODE_NOT_RUNNING and not want_on:
-            return True, MESSAGE_STOPPED
-        folded = _token(message)
-        if want_on and _contains(folded, _ALREADY_RUNNING_MARKERS):
-            return True, MESSAGE_STARTED
-        if not want_on and _contains(folded, _NOT_RUNNING_MARKERS):
-            return True, MESSAGE_STOPPED
-
-        success = payload.get("success")
-        if isinstance(success, bool) and not success:
-            return False, _with_code(_failure_hint(status, code, want_on), code)
-        # A 2xx without a recognisable ``success`` field still counts: the host
-        # route returns its lifecycle dict directly and field names may move.
-        return (True, MESSAGE_STARTED if want_on else MESSAGE_STOPPED)
-
-    def _write_failure(self, error: BaseException, want_on: bool) -> tuple[bool, str]:
-        if not isinstance(error, _net.HttpStatusCodeError):
-            return False, MESSAGE_SLOW if _timed_out(error) else MESSAGE_UNREACHABLE
-        status = _status_of(error)
-        code = _code_from_exception(error)
-        if not want_on and status == 404 and code in ("", CODE_NOT_RUNNING):
-            # Idempotent: nothing runs, which is exactly what "off" means. The host
-            # answers 404 PLUGIN_NOT_RUNNING here (lifecycle_service.py:1401-1410);
-            # _net discards the body, so a bare 404 on /stop is accepted too.
-            return True, MESSAGE_STOPPED
-        return False, _failure_hint(status, code, want_on)
 
 
 def _looks_registered(payload: dict[str, Any], plugin_id: str) -> bool:

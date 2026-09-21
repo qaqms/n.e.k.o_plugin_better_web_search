@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SECTIONS = ("search", "net", "ui", "host")
+SECTIONS = ("search", "net", "ui")
 
 # ``_num``/``_int``/``_text`` are the [search]-bound helpers (frozen from v0.1).
 SEARCH_ONLY = re.compile(r"self\._(?P<get>num|int|text)\(\s*\"(?P<key>[a-z0-9_]+)\"")
@@ -20,7 +20,7 @@ SEARCH_ONLY = re.compile(r"self\._(?P<get>num|int|text)\(\s*\"(?P<key>[a-z0-9_]+
 SEARCH_DIRECT = re.compile(r"self\._cfg\.get\(\s*\"(?P<key>[a-z0-9_]+)\"")
 # The section-aware helpers take the table name as their first argument.
 SCOPED = re.compile(
-    r"self\._(?P<get>raw|text_in|flag_in|list_in)\(\s*\"(?P<section>search|net|ui|host)\""
+    r"self\._(?P<get>raw|text_in|flag_in|list_in)\(\s*\"(?P<section>search|net|ui)\""
     r"\s*,\s*\"(?P<key>[a-z0-9_]+)\""
 )
 # Per-backend overrides are read through f-strings, e.g. f"{route}_proxy".

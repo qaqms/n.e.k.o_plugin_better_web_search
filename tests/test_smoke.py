@@ -9,7 +9,6 @@ PANEL_ENTRY_IDS = [
     "save_exa_key",
     "clear_exa_key",
     "test_exa_key",
-    "set_host_search",
     "get_host_search",
     "set_onboarding",
     "show_guide",
@@ -91,24 +90,29 @@ def test_panel_copy_tries_the_silent_paths_before_the_host_hook() -> None:
     assert order == sorted(order), f"copy fallback order regressed: {order}"
 
 
-def test_host_switch_states_intent_not_status() -> None:
-    """The built-in-search control must mirror the stored intent, never live state.
+def test_host_card_is_read_only() -> None:
+    """The card may report the built-in's state, never change it.
 
-    It was briefly `checked={hostKnown && !hostRunning}`: because the badge then
-    decided the switch position, a second click meant to "confirm the stop" sent
-    enabled=true and started the built-in back up (seen on a Steam install at
-    22:46:06 -> process started 22:46:07). The switch now reads [host].takeover_search,
-    and a mismatch between intent and reality gets its own warning + retry button.
+    It used to carry a Switch bound to ``set_host_search``, and the panel's own
+    history shows why that is a bad surface for a plugin to own: the switch briefly
+    read ``checked={hostKnown && !hostRunning}``, so a second click meant to
+    "confirm the stop" sent enabled=true and started the built-in back up (seen on a
+    Steam install at 22:46:06 -> process started 22:46:07). Reading intent instead
+    of live state fixed that, but not the real problem -- the write goes through the
+    host's management API, which a busy host answers after our client gives up
+    (19 logged failures across v0.2.0-v0.9.6, every one of them a change that had
+    landed). So there is no switch any more, and no write path to guard.
     """
     root = Path(__file__).resolve().parents[1]
     tsx = (root / "ui" / "panel.tsx").read_text(encoding="utf-8")
     body = tsx.split("function renderHostCard", 1)[1].split("\n  function ", 1)[0]
-    assert "checked={takeover}" in body
-    assert "toggleHostSearch(!value)" in body
-    assert "!hostRunning}" not in body
-    assert "panel.host.mismatch" in body and "panel.actions.retryStop" in body
-    assert "正在运行" not in _load_locale("zh-CN")["panel.host.label"]
-    assert "is running" not in _load_locale("en")["panel.host.label"]
+    assert "set_host_search" not in tsx
+    assert "toggleHostSearch" not in tsx
+    assert "checked={takeover}" not in body and "<Switch" not in body
+    assert "panel.actions.checkHost" in body          # the read stays one click away
+    assert "panel.host.stopHere" in body              # running -> told where to stop it
+    assert "插件中心" in _load_locale("zh-CN")["panel.host.stopHere"]
+    assert "Plugin Centre" in _load_locale("en")["panel.host.stopHere"]
 
 
 def test_last_search_card_shows_a_record_not_a_guess() -> None:
@@ -342,12 +346,12 @@ def test_every_panel_action_id_is_declared_as_an_entry() -> None:
 def test_default_config_sections_present_in_example() -> None:
     root = Path(__file__).resolve().parents[1]
     example = (root / "config.example.toml").read_text(encoding="utf-8")
-    for section in ("[search]", "[net]", "[ui]", "[host]"):
+    for section in ("[search]", "[net]", "[ui]"):
         assert section in example
     for key in ("exa_api_keys", "exa_tool",
                 "exa_key_fallback_anonymous", "baidu_warmup",
                 "duckduckgo_needs_proxy", "ssrf_allow_ranges", "onboarding_stage",
-                "first_run_notice_sent", "takeover_search"):
+                "first_run_notice_sent"):
         assert key in example, f"config.example.toml missing {key}"
     assert 'backend_chain = ["exa", "anysearch", "bing", "baidu"]' in example
 

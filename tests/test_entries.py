@@ -97,15 +97,13 @@ class FakeStore:
 
 
 def make_plugin(search: dict | None = None, *, net_: dict | None = None,
-                ui_: dict | None = None, host_: dict | None = None,
-                data: dict | None = None) -> BetterWebSearchPlugin:
+                ui_: dict | None = None, data: dict | None = None) -> BetterWebSearchPlugin:
     """A plugin instance with config sections set, no host, no real __init__."""
     if data is None:
         data = {
             "search": dict(search or {}),
             "net": dict(net_ or {}),
             "ui": dict(ui_ or {}),
-            "host": dict(host_ or {}),
         }
     plugin = object.__new__(BetterWebSearchPlugin)
     plugin.ctx = FakeCtx()
@@ -120,14 +118,11 @@ def make_plugin(search: dict | None = None, *, net_: dict | None = None,
     plugin._key_at = ""
     plugin._key_at_saved = ""
     plugin.store = FakeStore()
-    plugin._takeover_pending = False
     plugin._last_search = None
     plugin.config = FakeConfig(data)
     sections = plugin._sections
-    sections["search"] = dict(data.get("search") or {})
-    sections["net"] = dict(data.get("net") or {})
-    sections["ui"] = dict(data.get("ui") or {})
-    sections["host"] = dict(data.get("host") or {})
+    for name in entries.CONFIG_SECTIONS:
+        sections[name] = dict(data.get(name) or {})
     plugin._cfg = sections["search"]
     return plugin
 
@@ -670,7 +665,7 @@ def test_pool_never_leaks_a_key_into_panel_context_or_logs(monkeypatch) -> None:
 
 def test_the_fallback_switch_is_a_panel_button_that_persists(monkeypatch) -> None:
     """The user asked for a control, not a config key they have to type."""
-    data = {"search": {"exa_key_fallback_anonymous": False}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {"exa_key_fallback_anonymous": False}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     result = asyncio.run(plugin.set_key_fallback(enabled=True))
     assert result.is_ok()
@@ -791,8 +786,7 @@ def test_fingerprint_is_a_short_stable_hash_not_the_key() -> None:
 CONTEXT_KEYS = {
     "onboarding_stage", "exa_keys", "exa_key_masked", "exa_key_source", "exa_key_state",
     "exa_last_error", "chain", "effective_chain", "proxy_mode", "proxy_detected",
-    "host_search", "ssrf_fake_ip", "key_fallback", "quota_note", "takeover", "takeover_error",
-    "last_search",
+    "host_search", "ssrf_fake_ip", "key_fallback", "quota_note", "last_search",
 }
 
 KEY_CARD_KEYS = {"fingerprint", "masked", "state", "current"}
@@ -804,7 +798,7 @@ def test_panel_context_shape_and_mask(monkeypatch) -> None:
         {"exa_api_keys": [SECRET], "backend_chain": ["exa", "duckduckgo", "anysearch", "bing"]},
         ui_={"onboarding_stage": "trial"},
     )
-    context = plugin._build_panel_context({"exists": True, "running": True, "toggleable": True})
+    context = plugin._build_panel_context({"exists": True, "running": True})
     assert set(context) == CONTEXT_KEYS
     assert context["onboarding_stage"] == "trial"
     assert context["exa_key_masked"] == f"exa****{TAIL}"
@@ -818,7 +812,7 @@ def test_panel_context_shape_and_mask(monkeypatch) -> None:
     assert context["effective_chain"] == ["exa", "anysearch", "bing"]
     assert context["proxy_mode"] == "auto"
     assert context["proxy_detected"] is False
-    assert context["host_search"] == {"exists": True, "running": True, "toggleable": True}
+    assert context["host_search"] == {"exists": True, "running": True}
     assert context["ssrf_fake_ip"] is True
     assert "$10" in context["quota_note"]
     assert SECRET not in json.dumps(context, ensure_ascii=False)
@@ -827,7 +821,7 @@ def test_panel_context_shape_and_mask(monkeypatch) -> None:
 def test_panel_context_defaults_without_key(monkeypatch) -> None:
     monkeypatch.setattr(net, "system_proxy_present", lambda: False)
     plugin = make_plugin()
-    context = plugin._build_panel_context({"exists": False, "running": False, "toggleable": True})
+    context = plugin._build_panel_context({"exists": False, "running": False})
     assert context["exa_key_masked"] == ""
     assert context["exa_key_source"] == "none"
     assert context["chain"] == ["exa", "anysearch", "bing", "baidu"]
@@ -941,7 +935,7 @@ def test_a_too_short_query_does_not_overwrite_the_last_real_search(monkeypatch) 
 
 def test_panel_context_entry_returns_plain_dict_and_survives_host_failure(monkeypatch) -> None:
     # _host.HostPluginControl raising must not sink the context: it degrades to
-    # an "unknown" host_search block (contract's three keys still present).
+    # an "unknown" host_search block (both contract keys still present).
     class Boom:
         def __init__(self, *args, **kwargs):
             raise OSError("host api down")
@@ -950,7 +944,7 @@ def test_panel_context_entry_returns_plain_dict_and_survives_host_failure(monkey
     plugin = make_plugin({"exa_api_keys": [SECRET]})
     context = asyncio.run(plugin.panel_context())
     assert isinstance(context, dict)                      # context, not Ok()
-    assert context["host_search"] == {"exists": False, "running": False, "toggleable": True}
+    assert context["host_search"] == {"exists": False, "running": False}
     assert SECRET not in json.dumps(context, ensure_ascii=False)
 
 
@@ -996,7 +990,7 @@ class _LostAckConfig(FakeConfig):
 
 def _lost_ack_plugin(*, land: bool) -> BetterWebSearchPlugin:
     data = {"search": {"backend_chain": ["exa"], "exa_api_keys": []},
-            "net": {}, "ui": {}, "host": {}}
+            "net": {}, "ui": {}}
     plugin = make_plugin()
     plugin.config = _LostAckConfig(data, land=land)
     return plugin
@@ -1087,7 +1081,7 @@ def test_save_exa_key_persists_reloads_and_reports_masked(monkeypatch) -> None:
         return exa_results()
 
     monkeypatch.setattr(providers, "search_exa", good)
-    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     result = asyncio.run(plugin.save_exa_key(api_key="sk-new-key-abcd"))
     assert result.is_ok()
@@ -1108,7 +1102,7 @@ def test_save_exa_key_bad_key_saves_but_marks_invalid(monkeypatch) -> None:
         raise ApiKeyRejectedError("401 Invalid API key")
 
     monkeypatch.setattr(providers, "search_exa", reject)
-    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     result = asyncio.run(plugin.save_exa_key(api_key=SECRET))
     payload = result.value
@@ -1122,7 +1116,7 @@ def test_save_exa_key_bad_key_saves_but_marks_invalid(monkeypatch) -> None:
 def test_clear_and_test_exa_key_without_key(monkeypatch) -> None:
     monkeypatch.setattr(providers, "search_exa",
                         lambda *a, **k: pytest.fail("must not search without a key"))
-    data = {"search": {"exa_api_keys": [SECRET]}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {"exa_api_keys": [SECRET]}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     cleared = asyncio.run(plugin.clear_exa_key())
     assert cleared.is_ok() and data["search"]["exa_api_keys"] == []
@@ -1142,7 +1136,7 @@ def test_adding_a_key_that_is_already_there_does_not_double_it(monkeypatch) -> N
         return exa_results()
 
     monkeypatch.setattr(providers, "search_exa", good)
-    data = {"search": {"exa_api_keys": [SECRET]}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {"exa_api_keys": [SECRET]}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     result = asyncio.run(plugin.save_exa_key(api_key=SECRET))
     assert result.is_ok()
@@ -1195,12 +1189,11 @@ def test_a_network_failure_during_retest_leaves_the_key_verdict_alone(monkeypatc
 
 
 # ---------------------------------------------------------------------------
-# F. host toggle entries (must go through to_thread, degrade on failure)
+# F. host search status read (read-only: this plugin never switches it)
 # ---------------------------------------------------------------------------
 
 class FakeControl:
     calls: list[tuple] = []
-    outcome = (True, entries._host.MESSAGE_STOPPED)
 
     def __init__(self, base_url: str = "", timeout: float = 4.0):
         self.timeout = timeout
@@ -1209,131 +1202,65 @@ class FakeControl:
         FakeControl.calls.append(("status", plugin_id))
         return entries._host.HostPluginState(plugin_id, True, True, {})
 
-    def set_enabled(self, plugin_id, enabled):
-        FakeControl.calls.append(("set", plugin_id, enabled))
-        return FakeControl.outcome
+
+def test_the_write_path_stays_deleted() -> None:
+    """Nothing here may start or stop a host plugin -- that is the user's click.
+
+    Pressing the host's toggle from the panel meant POSTing
+    ``/plugin/web_search/stop``, which a host reloading its plugin list answers
+    8+ seconds late -- later than our own client waited, so a change that had
+    already landed came back as "未能连接宿主管理接口". Nineteen starts on a real
+    install (v0.2.0 through v0.9.6) logged exactly that; not one was a real
+    failure. Re-checking it in a background tick then had to disarm itself once
+    the stop was confirmed, which left a built-in that came back later never
+    re-stopped. Removing the write removes both failure modes.
+    """
+    assert not hasattr(entries.BetterWebSearchPlugin, "set_host_search")
+    assert not hasattr(entries.BetterWebSearchPlugin, "watch_host_takeover")
+    assert not hasattr(entries.BetterWebSearchPlugin, "_host_set_enabled_sync")
+    assert not hasattr(entries._host.HostPluginControl, "set_enabled")
+    assert "host" not in entries.CONFIG_SECTIONS
 
 
-def test_get_and_set_host_search_entries(monkeypatch) -> None:
+def test_startup_never_calls_the_host_management_api(monkeypatch) -> None:
+    """Boot must not spend the host's 10 s startup budget on a management call."""
+    def never(*_args, **_kw):
+        raise AssertionError("startup must not talk to the host management API")
+
+    monkeypatch.setattr(entries._host, "HostPluginControl", never)
+    plugin = make_plugin()
+    assert asyncio.run(plugin.startup()).is_ok()      # boots anyway, searches anyway
+
+
+def test_get_host_search_only_reads(monkeypatch) -> None:
     FakeControl.calls = []
     monkeypatch.setattr(entries._host, "HostPluginControl", FakeControl)
     plugin = make_plugin()
     got = asyncio.run(plugin.get_host_search())
     assert got.is_ok() and got.value["running"] is True and got.value["exists"] is True
-    assert FakeControl.calls[-1] == ("status", entries._host.BUILTIN_SEARCH_PLUGIN_ID)
-
-    off = asyncio.run(plugin.set_host_search(enabled=False))
-    assert off.is_ok() and off.value["ok"] is True and off.value["running"] is False
-    assert FakeControl.calls[-1] == ("set", entries._host.BUILTIN_SEARCH_PLUGIN_ID, False)
-    # The user intent is remembered for startup ([host].takeover_search).
-    assert plugin._sections["host"]["takeover_search"] is True
-
-
-def test_startup_never_waits_on_the_host_management_api(monkeypatch) -> None:
-    """Measured: the host answered /stop at exactly the moment our client gave up.
-
-    That await spent 8 of the 10 seconds the host allows a plugin to boot -- and
-    ``config_change`` re-runs ``startup``, so every config edit paid it too, for a
-    change the host had already applied.
-    """
-    def never(*_args, **_kw):
-        raise AssertionError("startup must not call the host management API")
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", never)
-    plugin = make_plugin(host_={"takeover_search": True})
-    assert asyncio.run(plugin.startup()).is_ok()      # boots anyway, searches anyway
-    assert plugin._takeover_pending is True
-
-
-def test_the_tick_accepts_a_toggle_the_status_read_proves(monkeypatch) -> None:
-    class Stopped(FakeControl):
-        def status(self, plugin_id):
-            FakeControl.calls.append(("status", plugin_id))
-            return entries._host.HostPluginState(plugin_id, True, False, {})
-
-    FakeControl.calls = []
-    monkeypatch.setattr(entries._host, "HostPluginControl", Stopped)
-    plugin = make_plugin(host_={"takeover_search": True})
-    plugin._takeover_pending = True
-    plugin._takeover_error = entries._host.MESSAGE_SLOW
-    assert asyncio.run(plugin.watch_host_takeover()).is_ok()
     assert FakeControl.calls == [("status", entries._host.BUILTIN_SEARCH_PLUGIN_ID)]
-    assert plugin._takeover_pending is False
-    assert plugin._takeover_error == ""
+    assert "toggleable" not in got.value
 
 
-def test_the_tick_asks_again_until_the_stop_is_proven(monkeypatch) -> None:
-    """Sent is not done: the tick stays pending so the next one re-reads the state."""
-    FakeControl.calls = []
-    FakeControl.outcome = (True, entries._host.MESSAGE_STOPPED)
-    monkeypatch.setattr(entries._host, "HostPluginControl", FakeControl)   # status: running
-    plugin = make_plugin(host_={"takeover_search": True})
-    plugin._takeover_pending = True
-    asyncio.run(plugin.watch_host_takeover())
-    assert ("set", entries._host.BUILTIN_SEARCH_PLUGIN_ID, False) in FakeControl.calls
-    assert plugin._takeover_pending is True
-    assert plugin._takeover_error == ""
+def test_a_dead_management_api_degrades_the_read_instead_of_raising(monkeypatch) -> None:
+    class Dead:
+        def __init__(self, *a, **k):
+            raise OSError("connection refused")
 
-
-def test_a_busy_management_api_stays_pending_instead_of_blaming_the_link(monkeypatch) -> None:
-    class Busy(FakeControl):
-        def status(self, plugin_id):
-            return entries._host.HostPluginState(plugin_id, False, False,
-                                                 {"error": entries._host.MESSAGE_SLOW})
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", Busy)
-    plugin = make_plugin(host_={"takeover_search": True})
-    plugin._takeover_pending = True
-    asyncio.run(plugin.watch_host_takeover())
-    assert plugin._takeover_pending is True                 # retried on the next tick
-    assert plugin._takeover_error == entries._host.MESSAGE_SLOW
-
-
-def test_a_slow_toggle_that_landed_reports_success_not_a_failure(monkeypatch) -> None:
-    """Click 停用, the POST times out, the built-in is stopped anyway: that is ok.
-
-    Leaving ``_takeover_pending`` false here matters -- the panel would otherwise
-    keep saying "not applied" about a state that already holds.
-    """
-    class Late(FakeControl):
-        def set_enabled(self, plugin_id, enabled):
-            FakeControl.calls.append(("set", plugin_id, enabled))
-            return False, entries._host.MESSAGE_SLOW
-
-        def status(self, plugin_id):
-            FakeControl.calls.append(("status", plugin_id))
-            return entries._host.HostPluginState(plugin_id, True, False, {})
-
-    FakeControl.calls = []
-    monkeypatch.setattr(entries._host, "HostPluginControl", Late)
+    monkeypatch.setattr(entries._host, "HostPluginControl", Dead)
     plugin = make_plugin()
-    result = asyncio.run(plugin.set_host_search(enabled=False))
-    assert result.value["ok"] is True
-    assert result.value["message"] == entries._host.MESSAGE_STOPPED
-    assert plugin._takeover_pending is False
-    assert plugin._takeover_error == ""
+    result = asyncio.run(plugin.get_host_search())
+    assert result.is_ok() and result.value["ok"] is False
+    assert "插件中心" in result.value["message"]
 
 
-def test_an_unproven_toggle_is_handed_to_the_tick(monkeypatch) -> None:
-    class StillRunning(FakeControl):
-        def set_enabled(self, plugin_id, enabled):
-            return False, entries._host.MESSAGE_SLOW
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", StillRunning)
-    plugin = make_plugin()
-    result = asyncio.run(plugin.set_host_search(enabled=False))
-    assert result.value["ok"] is False
-    assert plugin._takeover_pending is True         # the tick finishes the job
-    assert plugin._takeover_error == entries._host.MESSAGE_SLOW
-
-
-def test_panel_context_caches_the_host_read_so_switches_stop_hanging(monkeypatch) -> None:
+def test_panel_context_caches_the_host_read_so_refreshes_stop_hanging(monkeypatch) -> None:
     """Every action ends with a context refresh; it must not re-pay the round trip."""
     reads = []
 
     def fake_sync(self, timeout=4.0):
         reads.append(timeout)
-        return {"exists": True, "running": False, "toggleable": True}
+        return {"exists": True, "running": False}
 
     monkeypatch.setattr(entries.BetterWebSearchPlugin, "_host_search_state_sync", fake_sync)
     plugin = make_plugin()
@@ -1346,38 +1273,10 @@ def test_panel_context_caches_the_host_read_so_switches_stop_hanging(monkeypatch
     plugin._host_state_cache = None
     monkeypatch.setattr(entries.BetterWebSearchPlugin, "_host_search_state_sync",
                         lambda self, timeout=4.0: {"exists": False, "running": False,
-                                                   "toggleable": True, "error": "boom"})
+                                                   "error": "boom"})
     asyncio.run(plugin.panel_context())
     assert len(reads) == 1
 
-
-def test_set_host_search_invalidates_the_cache_and_keeps_intent_on_failure(monkeypatch) -> None:
-    reads = []
-
-    def fake_sync(self, timeout=4.0):
-        reads.append(1)
-        return {"exists": True, "running": True, "toggleable": True}
-
-    monkeypatch.setattr(entries.BetterWebSearchPlugin, "_host_search_state_sync", fake_sync)
-    plugin = make_plugin()
-    asyncio.run(plugin.panel_context())            # warms the cache
-
-    class Dead:
-        def __init__(self, *a, **k):
-            raise OSError("connection refused")
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", Dead)
-    result = asyncio.run(plugin.set_host_search(enabled=False))
-    assert result.is_ok() and result.value["ok"] is False
-    # Intent is stored even though the host call failed -- the switch must not
-    # snap back, or the next click means the opposite of what the user intends.
-    assert plugin._sections["host"]["takeover_search"] is True
-    assert plugin.config.data["host"]["takeover_search"] is True
-    assert result.value["takeover"] is True and result.value["running"] is None
-    assert plugin._takeover_error                                    # surfaced copy
-    context = asyncio.run(plugin.panel_context())
-    assert context["takeover"] is True and context["takeover_error"]
-    assert len(reads) == 2, "the toggle must have dropped the cached state"
 
 
 def test_search_logs_which_backend_answered(monkeypatch) -> None:
@@ -1394,24 +1293,13 @@ def test_search_logs_which_backend_answered(monkeypatch) -> None:
     assert "attempted=['bing', 'exa']" in blob
 
 
-def test_set_host_search_failure_degrades_without_raising(monkeypatch) -> None:
-    class Dead(FakeControl):
-        def __init__(self, base_url="", timeout=4.0):
-            raise OSError("connection refused")
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", Dead)
-    plugin = make_plugin()
-    result = asyncio.run(plugin.set_host_search(enabled=True))
-    assert result.is_ok() and result.value["ok"] is False
-    assert "宿主" in result.value["message"]
-
 
 # ---------------------------------------------------------------------------
 # G. onboarding state flow
 # ---------------------------------------------------------------------------
 
 def test_set_onboarding_and_show_guide_flow() -> None:
-    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     done = asyncio.run(plugin.set_onboarding(stage="done"))
     assert done.is_ok() and done.value["stage"] == "done"
@@ -1424,7 +1312,7 @@ def test_set_onboarding_and_show_guide_flow() -> None:
 
 
 def test_first_run_notice_pushes_once_and_marks_sent() -> None:
-    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
     pushes: list[dict] = []
     plugin.push_message = lambda **kw: pushes.append(kw) or {"submitted": True}
@@ -1444,7 +1332,7 @@ def test_first_run_notice_pushes_once_and_marks_sent() -> None:
 
 
 def test_first_run_notice_skipped_when_stage_or_host_says_no() -> None:
-    data = {"search": {}, "net": {}, "ui": {"onboarding_stage": "trial"}, "host": {}}
+    data = {"search": {}, "net": {}, "ui": {"onboarding_stage": "trial"}}
     plugin = make_plugin(data=data)
     plugin.push_message = lambda **kw: pytest.fail("must not push once a stage exists")
     assert asyncio.run(plugin.startup()).is_ok()
@@ -1452,45 +1340,11 @@ def test_first_run_notice_skipped_when_stage_or_host_says_no() -> None:
     def boom(**_kw):
         raise RuntimeError("bus down")
 
-    plugin2 = make_plugin(data={"search": {}, "net": {}, "ui": {}, "host": {}})
+    plugin2 = make_plugin(data={"search": {}, "net": {}, "ui": {}})
     plugin2.push_message = boom
     result = asyncio.run(plugin2.startup())
     assert result.is_ok()                             # push failure must not sink startup
     assert plugin2._sections["ui"].get("first_run_notice_sent") is not True  # retry next boot
-
-
-def test_the_tick_swallows_a_dead_management_api_and_retries(monkeypatch) -> None:
-    """"Must never break the boot" moves with the work to the tick.
-
-    A host that is not listening at all still leaves the plugin running and
-    searching; the toggle stays pending for the next tick instead of failing a
-    lifecycle entry.
-    """
-    seen: list[tuple] = []
-
-    class Toggle(FakeControl):
-        def status(self, plugin_id):
-            raise RuntimeError("host not listening")
-
-        def set_enabled(self, plugin_id, enabled):
-            seen.append((plugin_id, enabled))
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", Toggle)
-    plugin = make_plugin(host_={"takeover_search": True})
-    plugin._takeover_pending = True
-    result = asyncio.run(plugin.watch_host_takeover())
-    assert result.is_ok()
-    assert seen == []                                      # the read failed first
-    assert plugin._takeover_pending is True
-    assert plugin._takeover_error == entries._MSG_NO_HOST
-
-
-def test_startup_without_takeover_does_not_touch_host(monkeypatch) -> None:
-    def explode(*args, **kwargs):
-        raise AssertionError("HostPluginControl must not be built when takeover_search is false")
-
-    monkeypatch.setattr(entries._host, "HostPluginControl", explode)
-    assert asyncio.run(make_plugin().startup()).is_ok()
 
 
 # ---------------------------------------------------------------------------
@@ -1524,7 +1378,7 @@ def test_tolerant_bool_and_text_parsers() -> None:
 
 def test_set_ssrf_guard_switch_round_trips() -> None:
     """The panel's one-click switch must actually change what fetch allows."""
-    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {}, "net": {}, "ui": {}}
     plugin = make_plugin(data=data)
 
     off = asyncio.run(plugin.set_ssrf_guard(enabled=False))

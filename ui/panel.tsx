@@ -37,7 +37,6 @@ const EXA_KEY_PAGE = "https://dashboard.exa.ai/api-keys"
 type HostSearchState = {
   exists?: boolean
   running?: boolean
-  toggleable?: boolean
 }
 
 type LastSearchState = {
@@ -73,8 +72,6 @@ type PanelState = {
   proxy_mode?: string
   proxy_detected?: boolean
   host_search?: HostSearchState
-  takeover?: boolean
-  takeover_error?: string
   ssrf_fake_ip?: boolean
   quota_note?: string
   last_search?: LastSearchState
@@ -237,13 +234,6 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   const hostKnown = typeof hostSearch.exists === "boolean" || typeof hostSearch.running === "boolean"
   const hostExists = asBool(hostSearch.exists, true)
   const hostRunning = asBool(hostSearch.running, false)
-  const hostToggleable = asBool(hostSearch.toggleable, false)
-  // The switch reflects what the user asked for; the badge reflects reality. They
-  // can disagree when the host is too slow to honour the stop -- say so instead
-  // of letting the user click the switch again to "confirm".
-  const takeover = asBool(safeState.takeover, false)
-  const takeoverError = asString(safeState.takeover_error, "")
-  const takeoverMismatch = takeover && hostRunning
   const ssrfFakeIpKnown = typeof safeState.ssrf_fake_ip === "boolean"
   const ssrfFakeIp = asBool(safeState.ssrf_fake_ip, false)
   const proxyMode = asString(safeState.proxy_mode, "-")
@@ -409,18 +399,6 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     if (!result) return
     const ok = resultOk(result)
     const message = resultMessage(result) || (ok ? t("panel.messages.keyRemoved") : t("panel.messages.keyRemoveFailed"))
-    showNotice(message, !ok)
-    if (ok) toast.success(message)
-    else toast.error(message)
-    await refreshContext()
-  }
-
-  async function toggleHostSearch(enabled: boolean): Promise<void> {
-    const result = await runAction("set_host_search", { enabled }, "host", 20000)
-    if (!result) return
-    const ok = resultOk(result)
-    const fallback = enabled ? t("panel.messages.hostOn") : t("panel.messages.hostOff")
-    const message = resultMessage(result) || (ok ? fallback : t("panel.messages.hostFailed"))
     showNotice(message, !ok)
     if (ok) toast.success(message)
     else toast.error(message)
@@ -783,41 +761,29 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   }
 
   function renderHostCard() {
-    // The switch used to be labelled "内置「网络搜索」正在运行" -- a status sentence on an
-    // intent control, so it kept reading as a claim after the built-in search was stopped and
-    // looked like the toggle had done nothing. It now states the intent (on = stopped for us)
-    // and only the badge asserts a state.
-    const hostDisabled = busy("host") || !hostToggleable || !hostExists || !canCall("set_host_search")
+    // Read-only by design. Pressing the host's toggle from here meant POSTing
+    // /plugin/web_search/stop, and a host that is reloading its plugin list answers
+    // that 8+ seconds late -- late enough that our client had already given up, so
+    // the panel could not tell "the built-in is stopped" from "it failed" and kept
+    // reporting a landed change as an error. Stopping it is one click in the host's
+    // plugin centre and persists across restarts, so all we do here is tell the
+    // truth about whether it is still running.
     let hint = t("panel.host.help")
     if (!hostKnown) hint = t("panel.host.stateUnknown")
     else if (!hostExists) hint = t("panel.host.notFound")
-    else if (!hostToggleable) hint = t("panel.host.notToggleable")
-    else if (!canCall("set_host_search")) hint = t("panel.errors.actionUnavailable")
     return (
       <Card title={t("panel.host.title")}>
         <Stack>
           <Inline gap={3} wrap align="center" justify="space-between">
-            <Switch
-              checked={takeover}
-              label={t("panel.host.label")}
-              disabled={hostDisabled}
-              onChange={(value) => toggleHostSearch(!value)}
-            />
+            <Text>{t("panel.host.label")}</Text>
             <StatusBadge
-              tone={!hostKnown ? "info" : hostRunning ? "success" : "warning"}
+              tone={!hostKnown ? "info" : hostRunning ? "warning" : "success"}
               label={!hostKnown ? t("panel.host.stateUnknown") : hostRunning ? t("panel.host.stateRunning") : t("panel.host.stateStopped")}
             />
           </Inline>
           <Text>{hint}</Text>
-          <Text>{t("panel.host.manualTip")}</Text>
-          {takeoverMismatch ? <Alert tone="warning">{t("panel.host.mismatch")}</Alert> : null}
-          {takeoverError ? <Text>{t("panel.host.lastError", { detail: takeoverError })}</Text> : null}
+          {hostKnown && hostExists && hostRunning ? <Alert tone="warning">{t("panel.host.stopHere")}</Alert> : null}
           <Inline gap={3} wrap>
-            {takeoverMismatch ? (
-              <Button tone="danger" disabled={busy("host") || !canCall("set_host_search")} onClick={() => toggleHostSearch(false)}>
-                {label("host", "panel.actions.retryStop")}
-              </Button>
-            ) : null}
             <Button tone="default" disabled={busy("hostcheck") || !canCall("get_host_search")} onClick={checkHostSearch}>
               {label("hostcheck", "panel.actions.checkHost")}
             </Button>
