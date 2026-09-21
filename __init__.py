@@ -19,17 +19,20 @@ Design constraints, in order of why they matter:
 4. **Read, not just find.** ``search`` alone gives the model titles and
    snippets; ``fetch`` gives it the actual page, which is what makes an answer
    trustworthy.
-5. **The panel owns the secrets.** ``exa_api_key`` lives only in the plugin
-   config. Every surface that leaves this process (logs, ``report_status``,
-   entry results, panel context) carries the masked form ``exa****tail4`` at
-   most, because the host's status payload is logged verbatim at INFO
-   (``core/context.py:703``) and the log redaction list is dead code
-   (``plugin/logging_config.py:174-185``).
+5. **The panel owns the secrets.** ``exa_api_keys`` lives only in the plugin
+   config, and per-key health (which key is out of credits) is derived from what
+   Exa actually answered -- never from a stored balance, because Exa's usage API
+   reports spend only and is gated per team. Every surface that leaves this
+   process (logs, ``report_status``, entry results, panel context) carries the
+   masked form ``exa****tail4`` at most, because the host's status payload is
+   logged verbatim at INFO (``core/context.py:703``) and the log redaction list
+   is dead code (``plugin/logging_config.py:174-185``).
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import time
 from typing import Any, Callable, Dict, List, Optional
 
@@ -82,6 +85,11 @@ DEFAULT_SSRF_ALLOW_RANGES = ("198.18.0.0/15",)
 # (capped at 2.5 s) -- that is what made the switches feel like they hung.
 HOST_STATE_TTL_SECONDS = 20.0
 
+# Where the Exa key ring currently starts, kept in the plugin's own KV store
+# ([plugin.store]) rather than the config: a config write rebuilds the
+# coordinators and drops every search cache with it.
+KEY_RING_STORE_KEY = "exa_key_ring"
+
 _ERROR_CODES = {
     "blocked": "BETTER_WEB_SEARCH_BLOCKED",
     "busy": "BETTER_WEB_SEARCH_BUSY",
@@ -91,14 +99,22 @@ _ERROR_CODES = {
 }
 
 # User-facing copy. Never interpolate raw upstream text or the key here.
-_MSG_KEY_INVALID = "Exa 密钥无效：请打开本插件面板重新填写（不填密钥也能匿名搜索）"
-_MSG_QUOTA = "Exa 密钥额度已用尽：本次已改用匿名档，额度每月自动刷新"
+_MSG_KEY_INVALID = "Exa 密钥没验通过：这把已跳过，请到面板重新填写或再加一把"
+_MSG_QUOTA = "Exa 密钥额度已用尽：这把已跳过，池里还有别的钥匙就接着用，额度每月自动刷新"
+# Raised once the whole ring failed: wording lands in the "限流" bucket of the
+# self-check, which is what a dead pool actually looks like from the outside.
+_MSG_POOL_SPENT = "Exa 密钥池全部限流或额度用尽：本次改用其它搜索来源，稍后会再试"
+# A pass that could not reach Exa at all. Kept out of the ring on purpose: see
+# _call_with_exa_keys. The wording must carry 超时/连不上 so the self-check still
+# reports it as a network problem rather than 反爬.
+_MSG_EXA_UNREACHABLE = "Exa 这次连不上（超时或网络不可达）：本次改用其它搜索来源，稍后会再试"
 _MSG_NO_HOST = "未能连接宿主管理接口，请到插件中心手动开关『网络搜索』"
-_QUOTA_NOTE = "每月刷新 $10 ≈ 1400 次；不填 key 也能用，但匿名档慢且限额低"
+_QUOTA_NOTE = "每个账号每月刷新 $10 ≈ 1400 次；多填几把会自动轮流用，不填也能搜，只是匿名档慢且限额低"
 _ONBOARDING_HINT = (
     "主人，『更好的网络搜索』已经装好啦。请打开插件中心里的『联网搜索』面板："
     "点【先体验】就能立刻免密钥搜索；想更快更稳，可以照面板里的教程注册一个 "
-    "Exa 免费密钥（邮箱注册，每月 $10 额度）粘贴进去并一键测试。"
+    "Exa 免费密钥（邮箱注册，每个账号每月 $10 额度）粘贴进去并一键测试——"
+    "一个账号不够用就多注册几个、把密钥都加进密钥池，一把用完会自动换下一把。"
     "面板里还能一键停用系统自带的『网络搜索』，避免两个搜索插件互相抢活。"
 )
 
@@ -148,6 +164,14 @@ class BetterWebSearchPlugin(NekoPluginBase):
         self._key_state: str = "unknown"  # unknown|valid|invalid
         self._quota_state: str = ""       # ""|exhausted
         self._exa_last_error: str = ""
+        # Per-key verdicts, keyed by fingerprint: what Exa last said about this
+        # key ("ok" | "exhausted" | "invalid"). Pure display -- the ring position,
+        # not a verdict, decides who gets tried next.
+        self._key_health: Dict[str, str] = {}
+        # The key the next search starts from, and what is already in the store.
+        # Restored at startup so a reload does not restart the rotation.
+        self._key_at: str = ""
+        self._key_at_saved: str = ""
         # Last good host-status read: (monotonic stamp, state dict). The panel
         # refreshes after every action; re-asking the host each time added seconds.
         self._host_state_cache: Optional[tuple] = None
@@ -349,6 +373,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
     async def startup(self, **_):
         await self._load_sections()
         self._coordinators.clear()
+        await self._load_key_ring()
 
         order = self._ordered_chain()
         effective = self._effective_chain()
@@ -358,9 +383,9 @@ class BetterWebSearchPlugin(NekoPluginBase):
         # and the host logs plugin status verbatim.
         self.logger.info(
             "better_web_search ready: chain={} effective={} proxy_mode={} system_proxy={} "
-            "anysearch_key={} exa_key={}",
+            "anysearch_key={} exa_keys={}",
             order, effective, self._text("proxy", "auto"), proxies_present,
-            bool(self._text("anysearch_api_key")), bool(self._text("exa_api_key")),
+            bool(self._text("anysearch_api_key")), len(self._exa_keys()),
         )
         await self._assert_host_takeover()
         await self._maybe_send_first_run_notice()
@@ -372,7 +397,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "system_proxy_detected": proxies_present,
             "proxy_usable": self._proxy_available(),
             "anysearch_api_key_configured": bool(self._text("anysearch_api_key")),
-            "exa_key_configured": bool(self._text("exa_api_key")),
+            "exa_key_count": len(self._exa_keys()),
             "exa_key_state": self._key_state,
             "onboarding_stage": self._text_in("ui", "onboarding_stage"),
         }
@@ -502,6 +527,138 @@ class BetterWebSearchPlugin(NekoPluginBase):
         return True
 
     # ------------------------------------------------------------------
+    # Exa key pool: several accounts, one $10 monthly credit each
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _key_fingerprint(key: str) -> str:
+        """Short stable id for one key. The key never becomes a dict key itself."""
+        return hashlib.sha256(str(key or "").encode("utf-8")).hexdigest()[:8]
+
+    def _exa_keys(self) -> List[str]:
+        """Configured keys, de-duplicated, in config order (the ring order)."""
+        pool: List[str] = []
+        for key in self._list_in("search", "exa_api_keys", ()):
+            if key not in pool:
+                pool.append(key)
+        return pool
+
+    def _call_with_exa_keys(self, attempt: Callable[[str], Any]) -> Any:
+        """One ring pass over the pool, ending early when Exa itself is unreachable.
+
+        ``_resilience`` only cools a backend down for ``BlockedError``, and a dead
+        socket is no key's fault: stepping sideways would hang once per key, on the
+        same broken route, until the whole search budget is gone -- which also
+        leaves nothing for the backends behind Exa. One pass is enough to know.
+        """
+        try:
+            return self._exa_ring_pass(attempt)
+        except _net.NetworkError as error:
+            raise BlockedError(_MSG_EXA_UNREACHABLE) from error
+
+    def _exa_ring_pass(self, attempt: Callable[[str], Any]) -> Any:
+        """Round-robin the pool: a key that answers badly yields to the next.
+
+        Deliberately no per-key timers. The ring starts at the key that last
+        answered and only steps forward when that one fails, so a spent key is
+        not touched again until every other key has had its turn -- which is also
+        roughly how long it takes the user to work through the rest of the pool.
+        When the whole ring fails, the single ``BlockedError`` below hands Exa to
+        the coordinator's penalty box, so the next search does not re-run it.
+        """
+        pool = self._exa_keys()
+        if not pool:
+            return attempt("")
+
+        can_degrade = self._flag_in("search", "exa_key_fallback_anonymous", False)
+        start = self._key_start(pool)
+        for offset in range(len(pool)):
+            index = (start + offset) % len(pool)
+            key = pool[index]
+            finger = self._key_fingerprint(key)
+            try:
+                results = attempt(key)
+            except SearchProviderError as error:
+                # Anything that answered -- wrongly, expensively, with a 5xx body
+                # -- is worth a step sideways, because the next account is a
+                # different identity with its own quota and rate limit. Only
+                # 401/402 leave a verdict on *this* key: a 429 says nothing about
+                # it, and one fast double-click must not mark a healthy pool dead.
+                self._note_exa_key_error(error)
+                if isinstance(error, ApiKeyRejectedError):
+                    self._key_health[finger] = "invalid"
+                elif isinstance(error, QuotaExhaustedError):
+                    self._key_health[finger] = "exhausted"
+                self.logger.info("exa key {} failed ({})", finger, type(error).__name__)
+                continue
+            self._key_at = finger
+            self._key_health[finger] = "ok"
+            self._key_state = "valid"
+            self._quota_state = ""
+            self._exa_last_error = ""
+            return results
+
+        if can_degrade:
+            # Returns or raises: an anonymous failure must propagate untouched so
+            # the backend chain moves on, and a key verdict set above must not be
+            # painted over by this attempt's success.
+            self.logger.info("exa degraded to anonymous tier (no usable key left)")
+            return attempt("")
+        raise BlockedError(_MSG_POOL_SPENT)
+
+    def _key_start(self, pool: List[str]) -> int:
+        """Where the ring begins this time: the position of the key that last answered.
+
+        Held as a fingerprint rather than an index, so reordering or hand-editing
+        ``exa_api_keys`` cannot silently point the ring at a different account.
+        """
+        if self._key_at:
+            for index, key in enumerate(pool):
+                if self._key_fingerprint(key) == self._key_at:
+                    return index
+        return 0
+
+    async def _save_key_ring(self) -> None:
+        """Persist the ring position, so a reload does not restart the rotation.
+
+        Written only when the position actually moved -- that is once per spent
+        key, not once per search. Best effort: a store that is unavailable must
+        never turn a working search into an error.
+        """
+        store = getattr(self, "store", None)
+        if store is None or not getattr(store, "enabled", False):
+            return
+        if self._key_at == self._key_at_saved:
+            return
+        try:
+            outcome = await store.set(KEY_RING_STORE_KEY, {"at": self._key_at})
+        except Exception as error:
+            self.logger.info("key ring position not saved: {}:{}", type(error).__name__, error)
+            return
+        if outcome.is_ok():
+            self._key_at_saved = self._key_at
+
+    async def _load_key_ring(self) -> None:
+        """Restore the ring position; a stale or missing record means key #1."""
+        store = getattr(self, "store", None)
+        if store is None or not getattr(store, "enabled", False):
+            return
+        try:
+            outcome = await store.get(KEY_RING_STORE_KEY, None)
+        except Exception as error:
+            self.logger.info("key ring position not read: {}:{}", type(error).__name__, error)
+            return
+        if not outcome.is_ok():
+            return
+        value = outcome.value
+        saved = str(value.get("at") or "") if isinstance(value, dict) else ""
+        # A key the user has since removed must not drag the ring onto its
+        # neighbour: fall back to the start of the list instead.
+        if saved and any(self._key_fingerprint(key) == saved for key in self._exa_keys()):
+            self._key_at = saved
+        self._key_at_saved = self._key_at
+
+    # ------------------------------------------------------------------
     # backend dispatch
     # ------------------------------------------------------------------
 
@@ -511,35 +668,13 @@ class BetterWebSearchPlugin(NekoPluginBase):
         if policy is None or proxy_url is None:
             policy, proxy_url = self._route_policy(name)
         if name == "exa":
-            key = self._text("exa_api_key")
             tool = self._exa_tool()
             live = self._cfg.get("exa_live_crawl") is True  # pi-lens-ignore: no-identity-operator-on-literals
-            can_degrade = bool(key) and self._flag_in("search", "exa_key_fallback_anonymous", True)
 
             def call_exa() -> Any:
-                try:
-                    results = _providers.search_exa(
-                        query, limit, timeout=timeout, policy=policy, proxy_url=proxy_url,
-                        live_crawl=live, api_key=key, tool=tool)
-                except (ApiKeyRejectedError, QuotaExhaustedError) as error:
-                    self._note_exa_key_error(error)
-                    if not key:
-                        raise
-                    if not can_degrade:
-                        raise self._sanitised_key_error(error) from error
-                    # Exactly one anonymous retry *for this call* (plan §1.3): the
-                    # user's search must survive a bad/spent key without nagging.
-                    # No loop: if the anonymous tier fails, that error propagates
-                    # and the chain fallback takes over as before.
-                    self.logger.info("exa degraded to anonymous tier ({})", type(error).__name__)
-                    return _providers.search_exa(
-                        query, limit, timeout=timeout, policy=policy, proxy_url=proxy_url,
-                        live_crawl=live, api_key="", tool=tool)
-                if key:
-                    self._key_state = "valid"
-                    self._quota_state = ""
-                    self._exa_last_error = ""
-                return results
+                return self._call_with_exa_keys(lambda key: _providers.search_exa(
+                    query, limit, timeout=timeout, policy=policy, proxy_url=proxy_url,
+                    live_crawl=live, api_key=key, tool=tool))
 
             return call_exa
         if name == "anysearch":
@@ -568,13 +703,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             self._quota_state = "exhausted"
             self._exa_last_error = _MSG_QUOTA
 
-    @staticmethod
-    def _sanitised_key_error(error: BaseException) -> SearchProviderError:
-        """Same class, fixed Chinese copy: keeps upstream text out of user errors."""
-        if isinstance(error, ApiKeyRejectedError):
-            return ApiKeyRejectedError(_MSG_KEY_INVALID)
-        return QuotaExhaustedError(_MSG_QUOTA, getattr(error, "retry_after_seconds", None))
-
     async def _search_once(self, name: str, query: str, limit: int,
                            budget: float) -> Dict[str, Any]:
         timeout = min(self._num("timeout_seconds", 12, 2, 30), budget)
@@ -587,6 +715,10 @@ class BetterWebSearchPlugin(NekoPluginBase):
         async with asyncio.timeout(max(1.0, budget)):
             outcome = await coordinator.execute(query, limit, fetch)
         outcome.setdefault("backend", name)
+        if name == "exa":
+            # The ring may have stepped to another key to answer this one; a
+            # reload should start there, not back at the spent first key.
+            await self._save_key_ring()
         return outcome
 
     _KNOWN_BACKENDS = frozenset({"exa", "anysearch", "searxng"}) | frozenset(
@@ -844,15 +976,17 @@ class BetterWebSearchPlugin(NekoPluginBase):
             requested = "auto"
         routes: List[tuple[str, Callable[[float, str, str], dict]]] = []
         policy, proxy_url = self._route_policy("fetch")
-        exa_key = self._text("exa_api_key")
 
         if requested in {"auto", "direct"}:
             routes.append(("direct", lambda timeout, pol, pxy: _providers.fetch_direct(
                 target, timeout=timeout, policy=pol, proxy_url=pxy, max_chars=budget)))
         if requested in {"auto", "reader"}:
-            routes.append(("exa", lambda timeout, pol, pxy: _providers.fetch_exa(
-                target, timeout=timeout, policy=pol, proxy_url=pxy, max_chars=budget,
-                api_key=exa_key)))
+            # Same pool as search: reading a page must not keep hammering the key
+            # that just answered 402 a second ago.
+            routes.append(("exa", lambda timeout, pol, pxy: self._call_with_exa_keys(
+                lambda key: _providers.fetch_exa(
+                    target, timeout=timeout, policy=pol, proxy_url=pxy,
+                    max_chars=budget, api_key=key))))
 
         total = self._num("fetch_total_timeout_seconds", 24, 5, 28)
         loop = asyncio.get_running_loop()
@@ -909,15 +1043,54 @@ class BetterWebSearchPlugin(NekoPluginBase):
             return "exa****"
         return f"exa****{text[-4:]}"
 
+    def _exa_key_cards(self) -> List[Dict[str, Any]]:
+        """One masked row per configured key: its last verdict, and who is next.
+
+        ``state`` is ``unknown`` (not tried since the plugin started), ``ok``,
+        ``exhausted`` or ``invalid``; ``current`` marks the key the next search
+        starts from -- the one position that survives a reload.
+        """
+        pool = self._exa_keys()
+        current = self._key_start(pool)
+        # A key dropped by hand-editing exa_api_keys never passes through the
+        # panel's remove button, so this is where its verdict dies.
+        live = {self._key_fingerprint(key) for key in pool}
+        for finger in [held for held in self._key_health if held not in live]:
+            self._key_health.pop(finger, None)
+        cards: List[Dict[str, Any]] = []
+        for index, key in enumerate(pool):
+            finger = self._key_fingerprint(key)
+            cards.append({
+                "fingerprint": finger,
+                "masked": self._mask_key(key),
+                "state": self._key_health.get(finger, "unknown"),
+                "current": index == current,
+            })
+        return cards
+
+    def _exa_pool_state(self, cards: List[Dict[str, Any]]) -> str:
+        """The one badge the onboarding card shows for the whole pool."""
+        if not cards:
+            return "none"
+        states = {str(card.get("state")) for card in cards}
+        if states == {"invalid"}:
+            return "invalid"
+        if states <= {"exhausted", "invalid"}:
+            return "exhausted"
+        if "ok" in states:
+            return "valid"
+        return "unknown"
+
     def _build_panel_context(self, host_search: Dict[str, Any]) -> Dict[str, Any]:
         """Pure context builder (structure frozen by plan §3, keys masked)."""
-        key = self._text("exa_api_key")
         chain = self._ordered_chain()
+        cards = self._exa_key_cards()
         return {
             "onboarding_stage": self._text_in("ui", "onboarding_stage"),
-            "exa_key_masked": self._mask_key(key),
-            "exa_key_source": "config" if key else "none",
-            "exa_key_state": self._key_state,
+            "exa_keys": cards,
+            "exa_key_masked": str(cards[0]["masked"]) if cards else "",
+            "exa_key_source": "config" if cards else "none",
+            "exa_key_state": self._exa_pool_state(cards),
             "exa_last_error": self._exa_last_error,
             "chain": chain,
             "effective_chain": self._effective_chain(),
@@ -929,6 +1102,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
                 "toggleable": bool(host_search.get("toggleable", True)),
             },
             "ssrf_fake_ip": bool(self._ssrf_ranges()),
+            "key_fallback": self._flag_in("search", "exa_key_fallback_anonymous", False),
             "quota_note": _QUOTA_NOTE,
             # The switch position comes from these two, never from the live badge:
             # tying it to host_search.running made a confirming second click mean
@@ -1057,77 +1231,168 @@ class BetterWebSearchPlugin(NekoPluginBase):
             self._exa_last_error = _MSG_QUOTA
         # "network": leave the previous state, the key was not adjudicated.
 
-    @ui.action(label="保存密钥", icon="🔑", tone="success", group="exa", order=10)
+    async def _set_exa_pool(self, keys: List[str]) -> bool:
+        return await self._persist({"search": {"exa_api_keys": list(keys)}})
+
+    def _apply_key_verdict(self, key: str, kind: str) -> None:
+        """Record one verify result as this key's verdict.
+
+        ``network`` deliberately records nothing: an unreachable Exa says nothing
+        about the key, and a wrong verdict would take a good account out of the
+        ring.
+        """
+        self._apply_exa_verify_state(kind)
+        verdict = {"": "ok", "key": "invalid", "quota": "exhausted"}.get(kind)
+        if not verdict:
+            return
+        finger = self._key_fingerprint(key)
+        self._key_health[finger] = verdict
+        if verdict == "ok":
+            # A key that just answered is the best "start here" evidence there
+            # is -- and after a replace, the ring must not sit on the old one.
+            self._key_at = finger
+
+    @ui.action(label="添加密钥", icon="🔑", tone="success", group="exa", order=10)
     @plugin_entry(
         id="save_exa_key",
-        name="保存 Exa 密钥",
-        description="仅供面板调用：保存 Exa API Key 并立即用一次真实搜索验证。失败也会保存但会标为无效。",
+        name="添加 Exa 密钥",
+        description="仅供面板调用：把一把 Exa API Key 加进密钥池，并立即用一次真实搜索验证。"
+                    "验证失败也会保存，但那把钥匙会被暂时跳过。",
         timeout=28.0,
         input_schema={
             "type": "object",
             "properties": {
-                "key": {"type": "string", "description": "从 https://dashboard.exa.ai/api-keys 复制的密钥"},
+                "api_key": {"type": "string", "description": "从 https://dashboard.exa.ai/api-keys 复制的密钥"},
             },
-            "required": ["key"],
+            "required": ["api_key"],
         },
     )
-    async def save_exa_key(self, key: str = "", **_):
-        text = str(key or "").strip()
+    async def save_exa_key(self, api_key: str = "", **_):
+        text = str(api_key or "").strip()
         if not text:
             return Err(SdkError("请先在 Exa 控制台复制密钥，再粘贴到这里"))
-        saved = await self._persist({"search": {"exa_api_key": text}})
+        pool = self._exa_keys()
+        already = any(self._key_fingerprint(item) == self._key_fingerprint(text) for item in pool)
+        # Re-pasting the key that is already in the pool means "check this one
+        # again", not "give me two copies of it".
+        saved = True if already else await self._set_exa_pool(pool + [text])
         # Validate with the *candidate* key directly, before any fallback logic
         # could mask a broken key with an anonymous success.
         ok, ms, count, message, kind = await self._verify_exa_key(text)
-        self._apply_exa_verify_state(kind if saved else "network")
-        if not saved:
-            message = "密钥没能保存：宿主没有确认这次配置写入，请再点一次保存（不填密钥也能搜索）"
+        if saved:
+            self._apply_key_verdict(text, kind)
+            await self._save_key_ring()
+        else:
+            message = "密钥没能保存：宿主没有确认这次配置写入，请再点一次添加（不填密钥也能搜索）"
         await self._finish_onboarding_if_verified(kind if saved else "network")
         return Ok({
             "ok": bool(ok and saved),
             "masked": self._mask_key(text),
+            "key_count": len(self._exa_keys()),
             "message": message,
             "latency_ms": ms,
             "count": count,
             "key_state": "invalid" if (saved and kind == "key") else self._key_state,
         })
 
-    @ui.action(label="移除密钥", icon="🗑", tone="danger", group="exa", order=20)
+    @ui.action(label="移除这把", icon="🗑", tone="danger", group="exa", order=20)
+    @plugin_entry(
+        id="remove_exa_key",
+        name="移除一把 Exa 密钥",
+        description="仅供面板调用：从密钥池里去掉一把钥匙（按面板上的指纹），不碰 Exa 账号本身。",
+        timeout=15.0,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "fingerprint": {"type": "string", "description": "面板上那把密钥的 8 位指纹"},
+            },
+            "required": ["fingerprint"],
+        },
+    )
+    async def remove_exa_key(self, fingerprint: str = "", **_):
+        target = str(fingerprint or "").strip().casefold()
+        pool = self._exa_keys()
+        kept = [key for key in pool if self._key_fingerprint(key) != target]
+        if len(kept) == len(pool):
+            return Err(SdkError("池里没有这把密钥：面板可能过期了，先刷新一次"))
+        for key in pool:
+            if key not in kept:
+                self._key_health.pop(self._key_fingerprint(key), None)
+        if not await self._set_exa_pool(kept):
+            return Err(SdkError("移除失败：宿主没有确认这次配置写入，请重试"))
+        if self._key_at and self._key_at not in {self._key_fingerprint(key) for key in kept}:
+            self._key_at = ""          # the ring was sitting on the one just removed
+        await self._save_key_ring()
+        return Ok({"ok": True, "key_count": len(kept),
+                   "message": f"已移除一把，池里还剩 {len(kept)} 把"})
+
+    @ui.action(label="清空密钥池", icon="🧹", tone="danger", group="exa", order=30, confirm=True)
     @plugin_entry(
         id="clear_exa_key",
-        name="清除 Exa 密钥",
-        description="仅供面板调用：清空已保存的 Exa 密钥并回到匿名档。",
+        name="清除全部 Exa 密钥",
+        description="仅供面板调用：清空密钥池并回到匿名档。",
         timeout=15.0,
         input_schema={"type": "object", "properties": {}},
     )
     async def clear_exa_key(self, **_):
-        saved = await self._persist({"search": {"exa_api_key": ""}})
+        if not await self._set_exa_pool([]):
+            return Err(SdkError("清除失败：配置写入未成功，请重试"))
+        self._key_health.clear()
+        self._key_at = ""
         self._key_state = "unknown"
         self._quota_state = ""
         self._exa_last_error = ""
-        if not saved:
-            return Err(SdkError("清除失败：配置写入未成功，请重试"))
-        return Ok({"ok": True, "masked": "",
-                   "message": "已移除密钥，回到匿名档（也能搜索，只是更慢更低额）"})
+        await self._save_key_ring()
+        return Ok({"ok": True, "masked": "", "key_count": 0,
+                   "message": "已清空密钥池，回到匿名档（也能搜索，只是更慢更低额）"})
 
-    @ui.action(label="测试密钥", icon="🧪", group="exa", order=30)
+    @ui.action(label="重测全部密钥", icon="🧪", group="exa", order=40)
     @plugin_entry(
         id="test_exa_key",
-        name="测试 Exa 密钥",
-        description="仅供面板调用：用当前已保存的密钥真实搜索一次验证，不修改任何配置。",
+        name="重测 Exa 密钥池",
+        description="仅供面板调用：拿每把已保存的密钥真实搜索一次，刷新它们各自的状态；不改配置。",
         timeout=28.0,
         input_schema={"type": "object", "properties": {}},
     )
     async def test_exa_key(self, **_):
-        key = self._text("exa_api_key")
-        if not key:
-            return Ok({"ok": False,
+        pool = self._exa_keys()
+        if not pool:
+            return Ok({"ok": False, "key_count": 0, "keys": [],
                        "message": "还没有填写密钥；不填也能用，匿名档稍慢限额低",
                        "latency_ms": 0, "count": 0})
-        ok, ms, count, message, kind = await self._verify_exa_key(key)
-        self._apply_exa_verify_state(kind)
-        await self._finish_onboarding_if_verified(kind)
-        return Ok({"ok": bool(ok), "message": message, "latency_ms": ms, "count": count})
+        rows: List[Dict[str, Any]] = []
+        usable = 0
+        last_count = 0
+        started = time.perf_counter()
+        for key in pool:
+            # One search per key is real quota and the entry dies at 28s, so stop
+            # early and say so rather than losing every remaining answer to the
+            # host watchdog.
+            if time.perf_counter() - started > 20.0:
+                rows.append({"masked": self._mask_key(key), "ok": False, "kind": "skipped",
+                             "message": "未测：本次时间不够，再点一次接着往后测"})
+                continue
+            ok, ms, count, message, kind = await self._verify_exa_key(key)
+            self._apply_key_verdict(key, kind)
+            usable += 1 if ok else 0
+            last_count = count
+            rows.append({"fingerprint": self._key_fingerprint(key),
+                         "masked": self._mask_key(key), "ok": bool(ok),
+                         "kind": kind, "message": message, "count": count})
+        tested = len([row for row in rows if row.get("kind") != "skipped"])
+        ms_sum = int((time.perf_counter() - started) * 1000)
+        await self._save_key_ring()
+        await self._finish_onboarding_if_verified("" if usable else "key")
+        return Ok({
+            "ok": usable > 0,
+            "key_count": len(pool),
+            "usable": usable,
+            "keys": rows,
+            "latency_ms": ms_sum,
+            "count": last_count,
+            "message": (f"{usable}/{tested} 把可用" if tested else "太网不好：一把都没测成")
+                       + ("" if tested == len(pool) else f"（另有 {len(pool) - tested} 把未测）"),
+        })
 
     @ui.action(label="停用/启用内置搜索", icon="🔀", group="host", order=10, refresh_context=True)
     @plugin_entry(
@@ -1256,6 +1521,38 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "ranges": ranges,
             "message": ("已开启代理软件兼容：用 Clash 之类的 TUN 模式也能正常打开网页"
                         if want else "已关闭：只允许访问普通公网网址，更严但可能与 TUN 代理冲突"),
+        })
+
+    @ui.action(label="整池失败时降级无 Key", icon="🪂", group="exa", order=50)
+    @plugin_entry(
+        id="set_key_fallback",
+        name="切换无 Key 降级",
+        description="仅供面板调用：打开后，密钥池里每一把都报错时再试一次免密钥匿名档；"
+                    "关闭（默认）则直接改用其它搜索来源，把时间留给它们。",
+        timeout=10.0,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "enabled": {"type": "boolean",
+                            "description": "true=池子全败后再降级匿名档；false=直接换后端"},
+            },
+            "required": ["enabled"],
+        },
+    )
+    async def set_key_fallback(self, enabled: bool = False, **_):
+        """What to do when the whole ring failed is a judgement call: the user's.
+
+        Default off, because if every account the user owns answered 402, the
+        shared anonymous tier has usually lost the same traffic too -- and the
+        seconds spent proving that are missing from the next backend's budget.
+        """
+        want = bool(enabled)
+        if not await self._persist({"search": {"exa_key_fallback_anonymous": want}}):
+            return Err(SdkError("写入失败：配置未能保存，请重试"))
+        return Ok({
+            "ok": True, "enabled": want,
+            "message": ("已开启：密钥全部失效时再试一次免密钥匿名档"
+                        if want else "已关闭（默认）：密钥全部失效时直接改用其它搜索来源"),
         })
 
     def _probe(self, name: str, query: str, limit: int, timeout: float, *,

@@ -95,7 +95,9 @@ W5 由主控（我）实现，必须等 W1/W2/W3/W6 的接缝落地后进行；W
 ```python
 # _resilience.py (W1) —— 新增两个类型，均从 SearchProviderError 派生以便被现有 except 捕获
 class ApiKeyRejectedError(SearchProviderError): ...   # key 无效/失效（MCP isError 里的 401/403 文案，或 HTTP 401/403 且已带 key）
-class QuotaExhaustedError(SearchProviderError):       # 额度耗尽：HTTP 402，或 429 且带 key
+class QuotaExhaustedError(SearchProviderError):       # 额度耗尽：仅 HTTP 402（或文案里的 402/quota/credit）。
+                                                      # HTTP 429 不算：Exa 用 402 表示没钱、用 429 表示问得太快，
+                                                      # 带 key 的 429 归 BlockedError（后端退避，不冤枉这把钥匙）
     retry_after_seconds: float | None
 
 # _providers.py (W1)

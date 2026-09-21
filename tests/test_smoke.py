@@ -344,7 +344,8 @@ def test_default_config_sections_present_in_example() -> None:
     example = (root / "config.example.toml").read_text(encoding="utf-8")
     for section in ("[search]", "[net]", "[ui]", "[host]"):
         assert section in example
-    for key in ("exa_api_key", "exa_tool", "exa_key_fallback_anonymous", "baidu_warmup",
+    for key in ("exa_api_keys", "exa_tool",
+                "exa_key_fallback_anonymous", "baidu_warmup",
                 "duckduckgo_needs_proxy", "ssrf_allow_ranges", "onboarding_stage",
                 "first_run_notice_sent", "takeover_search"):
         assert key in example, f"config.example.toml missing {key}"

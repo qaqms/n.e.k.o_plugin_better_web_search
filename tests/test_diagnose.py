@@ -17,6 +17,7 @@ import pytest
 diagnose = conftest.load("_diagnose")
 net = conftest.load("_net")
 resilience = conftest.load("_resilience")
+entries = conftest.load("__init__")
 
 
 @pytest.fixture(autouse=True)
@@ -56,6 +57,10 @@ CASES = [
     # (exception, expected kind) — plan §0 says these three faults must not be conflated.
     (resilience.BlockedError("baidu 返回了人机验证页"), "blocked"),
     (resilience.BlockedError("Exa 免配额已用完（429）"), "blocked"),
+    # What the key ring raises when Exa never answered: cooling the backend needs
+    # BlockedError, but telling the user 反爬 about a dead socket sends them off to
+    # change backends for a network problem.
+    (resilience.BlockedError(entries._MSG_EXA_UNREACHABLE), "timeout"),
     (resilience.CooldownError("baidu 后端处于失败冷却期"), "blocked"),
     (resilience.QuotaExhaustedError("402 Payment Required"), "quota"),
     (resilience.QuotaExhaustedError("exa 429", retry_after_seconds=30.0), "quota"),
@@ -107,6 +112,22 @@ def test_cooldown_and_throttle_keep_their_own_wording() -> None:
     assert cooldown == diagnose.classify_error(resilience.CooldownError("anything"))[1]
     assert "退避" in cooldown
     assert "稍等几秒" in busy
+
+
+def test_a_throttled_block_is_not_reported_as_an_anti_scrape_page() -> None:
+    """``BlockedError`` covers both; only the captcha one deserves 反爬 wording.
+
+    Exa's keyed 429 arrives as ``BlockedError`` so the penalty box backs off. The
+    self-check must not then tell the user the backend blocks bots and to stop
+    trusting it -- the fix is to wait seconds.
+    """
+    throttle_kind, throttle = diagnose.classify_error(
+        resilience.BlockedError("Exa 请求过于频繁（429）"))
+    block_kind, block = diagnose.classify_error(
+        resilience.BlockedError("bing 返回了人机验证页"))
+    assert (throttle_kind, block_kind) == ("quota", "blocked")
+    assert "稍等几秒" in throttle
+    assert "验证页" in block
 
 
 def test_text_markers_still_classify_when_the_exception_class_is_unrelated() -> None:

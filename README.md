@@ -26,13 +26,20 @@
 
 > 如果你愿意拿延迟换更长的正文片段，可以把 `exa_tool` 显式改成 `advanced`（返回页正文、但实测 3.7–11.7s，会接近单后端 12s 超时）。默认**不**这么做。
 
-### 想更稳？填一个 Exa 免费 Key（可选，不是必需）
+### 想更稳？填 Exa 免费 Key（可选，不是必需），一把不够就填几把
 
 - 注册地址 <https://dashboard.exa.ai/api-keys>，国内**直连可达**；登录只有 Google / Email 两种方式，国内建议走 **Email 注册**。
 - 免费档 = 注册送 $20，之后**每月刷新 $10**；≈ **1400 次/月 ≈ 47 次/天**。
 - 计费口径：Exa 定价页写的是 *$7 per 1k requests (up to 10 results)*，**一次请求最多 10 条不加价**，超出部分另计 $1/1k。本插件走 `https://mcp.exa.ai/mcp` 的 `web_search_exa` 工具（带 Key 也是同一个端点，Key 放在 `x-api-key` 头），实测响应里 `costDollars.total = 0.007`，且 numResults 取 2/6/10 **同价**（`docs/plan-v0.2.md` §0）。所以 1400 次/月这个数只在"每次 ≤10 条"时成立；我们允许 `max_results` 到 15，模型要满 15 条的那次大约是 $0.012。
 - 不填 Key 照样能搜。填 Key 买到的是**额度确定性**，不是速度：实测 advanced 档 3.7–11.7s 会顶穿 12s 预算，所以 `exa_tool = "auto"` 恒用快路径（带不带 Key 都一样）。
-- Key 无效 / 额度用尽：本次搜索**自动降级回匿名档**，不会因此搜不到；面板会提示"密钥无效，请到面板重新填写"。
+- **一把不够用就填多把（环形轮转，没有计时器）**：`exa_api_keys` 是一个列表，一个 Exa 账号一把 Key。一次搜索从**上一把成功的那把**开始，这把报错就顺延下一把，走到列表末尾再绕回开头。所以一把用坏的钥匙，要等其它每把都轮过一遍才会再被试一次——**循环本身就是重试节奏**，不需要额外记"歇到几点"。顺移的条件是**这把答得不对**（401 / 402 / 429、5xx、给了段解析不出来的响应）；**根本没答上**（超时、连不上）时不去撞下一把，见下条。
+- **重启不会把循环打回原点**：环停在哪儿，就按密钥的指纹记在宿主给插件的 KV 存储里，插件或软件重启后从同一把继续。只有位置真的移动时（也就是一把用坏时）才写一次；存储不可用只记日志，不影响搜索。
+- **整池都报错、或 Exa 压根连不上 = 整条 Exa 链路进退避期**：这两种情况抛的都是 `BlockedError`，正好复用协调器已有的后端冷却（`cooldown_seconds`），下一次搜索不会把整个环再跑一遍，而是直接改走 anysearch / 必应。连不上时**一把都不多试**是有意的：首后端独享 `total_timeout_seconds` 这 25 秒，让 N 把钥匙各自挂满 12 秒的代价不是"慢一点"，是 anysearch 和必应一分预算都拿不到、这一轮真的搜不到东西。这条边界由 `tests/test_entries.py::test_a_hang_rotates_nothing_and_hands_exa_to_the_cooldown` 钉住。
+- **要不要降级成无 Key 是一个开关，默认关闭**：`exa_key_fallback_anonymous = false`。关掉的理由很实际——池子都空了时匿名档通常也不通，不如把 25 秒预算留给下一个后端。设为 `true` 时的行为是：整环跑完 → 匿名档试一次（只一次，不循环）→ 失败就交给后端链。
+- **401/403 会写明"这把没验通过"**，面板逐把显示状态；`fetch` 读正文走同一个环，不会刚在搜索里撞死、转头又拿它抓网页。
+- **429 顺移但绝不定罪**：Exa 用 402 表示没钱、用 429 表示问得太快（见其 billing 文档）。带 Key 的 429 只是**换一把继续**（不同账号各有自己的限速），不会在面板上留下"额度用完"的标记——否则手快连点两下就能把整个池子误杀掉。同理 5xx 与"解析不出来"也只顺移；**能写显示状态的只有 401/403 与 402**。
+- **不要再给环加计数器**：`exa_key_max_attempts` 这类"每把最多试几次"的开关加过又删了——一整圈天然就是上限，多一个配置就多一处会说谎的地方。
+- 查不到"还剩多少额度"：Exa 的 `GET /api-keys/{id}/usage` 只报已花费（`total_cost_usd`）不报余额，且属于 Team Management API、要找客服按团队开通。所以哪把钥匙还能用只能靠它实际答了什么来判断，面板不猜数字。
 - 安全：Key 只存在本插件配置里；日志、状态上报、面板回显一律最多出现 `exa****尾4位`（宿主日志不脱敏，所以我们连状态都不写明文）。
 
 ## 装完之后怎么用
@@ -176,10 +183,10 @@ proxy_url = ""              # 显式代理；填了就等效"有代理"，duckdu
 duckduckgo_proxy = "proxy"  # DDG 在国内直连不通，默认强制走代理
 bing_proxy = "direct"       # 百度/必应/搜狗保持直连，不要白白绕代理
 
-# Exa 密钥（可选升级）：更推荐直接在插件面板里填并一键测试
-exa_api_key = ""            # https://dashboard.exa.ai/api-keys 邮箱注册，每月 $10 免费额度
+# Exa 密钥（可选升级）：更推荐在插件面板里逐把填写并一键测试
+exa_api_keys = []           # 一个账号一把；邮箱注册每账号每月 $10：https://dashboard.exa.ai/api-keys
 exa_tool = "auto"           # auto 恒用快路径（advanced 实测会顶穿 12s 预算，仅显式选择时才用）
-exa_key_fallback_anonymous = true   # 坏 key / 超额自动降级匿名，搜索不断流
+exa_key_fallback_anonymous = false    # 开关：整池密钥都报错时要不要再降级匿名档（默认关闭）
 baidu_warmup = true         # 先领 BAIDUID cookie 再搜，否则基本必撞"百度安全验证"
 duckduckgo_needs_proxy = true        # 无代理时 ddg 不进 effective chain
 
@@ -248,6 +255,10 @@ node /tmp/tscpkg/node_modules/typescript/bin/tsc -p /tmp/tsx-check/tsconfig.json
 
 > `-c tests/pytest.ini` 不能省：本仓库根目录就是插件包（有 `__init__.py`），pytest 8/9 会为 rootdir 到用例之间的每层目录建 Package 节点并去 import 根 `__init__.py`，而插件独立检出时它无法作为包被导入，全部用例会在 setup 阶段集体 CollectError。把 rootdir 收进 `tests/` 就没这个节点（与宿主 `plugin/tests/pytest.ini` 同一约定）。
 
+四条门禁由测试自己把守，改的时候别绕开它们：`tests/test_config_keys.py` 要求代码里读到的每个配置键都在 `plugin.toml` 声明、且 `plugin.toml` 与 `config.example.toml` 键集一致；`tests/test_smoke.py` 要求中英 locale 键集完全相同、面板**可见**文案不超字数预算、`panel.tsx` 用到的每个 action id 真的是一条已声明入口、`plugin.toml` 与 `pyproject.toml` 版本号一致；`[plugin].version` 必须三段数字（`validate_cmd.py:181`，写成 `0.97` 直接 error）；宿主侧 `PLUGIN_EXECUTION_TIMEOUT = 30.0`、`PLUGIN_STARTUP_TIMEOUT = 10.0`（`plugin/settings.py:283,291`）决定了"入口 timeout ≤ 30、`total_timeout_seconds` 上限 28、**不要在 `startup()` 里做逐把网络探测**"。
+
+> 别把这份 checkout 直接拷进 `N.E.K.O/plugin/plugins/`：宿主要求**模块段等于目录名**（`plugin/core/host.py:459-478`），而仓库名带着一个点（`n.e.k.o_plugin_better_web_search`）只是 Git 侧的约定。要么用打包产物，要么建一个无点的目录名。
+
 结构：
 
 ```text
@@ -266,7 +277,10 @@ tests/           离线用例 + 真实响应夹具（**不进分发包**，见 p
 docs/plan-*.md   施工单，内部文档（**不进分发包**）
 ```
 
-面板 entry（actionId，全部对宿主 30s 看门狗留了预算）：`panel_context`、`save_exa_key`、`clear_exa_key`、`test_exa_key`、`set_host_search`、`get_host_search`、`set_onboarding`、`show_guide`、`diagnose_network`、`set_ssrf_guard`。
+面板 entry（actionId，全部对宿主 30s 看门狗留了预算）：`panel_context`、`save_exa_key`（参数 `api_key`，加一把）、
+`remove_exa_key`（参数 `fingerprint`）、`clear_exa_key`、`test_exa_key`（逐把重测，20s 内多少算多少）、
+`set_key_fallback`、`set_host_search`、`get_host_search`、`set_onboarding`、`show_guide`、`diagnose_network`、
+`set_ssrf_guard`。
 
 ## 发布到 Market
 
@@ -282,13 +296,11 @@ uv run --project "../N.E.K.O" python -m plugin.neko_plugin_cli publish .
 | 条件 | 代码位置 | 本仓库现状 |
 | --- | --- | --- |
 | git origin 的仓库名必须是 `n.e.k.o_plugin_<插件 id>`，**且全小写** | `release_cmd.py:230-232`（命令行比对用 `casefold()`，投稿页比对区分大小写） | ✅ 2026-09-20 已把 GitHub 仓库名改成 `n.e.k.o_plugin_better_web_search`，本地 `git remote` 同步跟上 |
-| tag 去掉 `v` 前缀后必须等于 `plugin.toml` 的 `version` | `release_cmd.py:237-239` | ✅ 当前 `plugin.toml` 是 `0.9.6`，要打的 tag 是 `v0.9.6`；`tests/test_smoke.py::test_release_version_is_stated_once` 保证 `plugin.toml` 与 `pyproject.toml` 不打架 |
-| `[plugin].version` 必须至少三段数字 | `validate_cmd.py:181`（`^\d+\.\d+\.\d+.*$`） | ✅ 写成 `0.96` 会直接 error，所以这里是 `0.9.6` |
+| tag 去掉 `v` 前缀后必须等于 `plugin.toml` 的 `version` | `release_cmd.py:237-239` | ✅ 当前 `plugin.toml` 是 `0.9.7`，要打的 tag 是 `v0.9.7`；`tests/test_smoke.py::test_release_version_is_stated_once` 保证 `plugin.toml` 与 `pyproject.toml` 不打架 |
+| `[plugin].version` 必须至少三段数字 | `validate_cmd.py:181`（`^\d+\.\d+\.\d+.*$`） | ✅ 写成 `0.97` 会直接 error，所以这里是 `0.9.7` |
 
-> 剩下没做的只有"打 tag + 投稿 Market"这一步：本仓库至今**零 tag**（内部编号 v0.2.0 到 v0.4.0 一个都没
-> 打过，当前这版同样还没打），
-> 所以 Market 上至今没有这个插件。GitHub 上的 `main` 已经比 tag 领先多个提交，**发布前要先确认推上去的
-> 就是你要发的那一棵树**。
+> 代码侧的发布条件都已验证过，剩下的只有"打 tag + 投稿 Market"这一步人工动作：`v0.9.6` 是本仓库第一个真正
+> 打上 tag 的版本（tag 在 `origin/main` 上）。发新版前照例确认推送的那棵树就是你要发的那一棵。
 
 ## Entry
 

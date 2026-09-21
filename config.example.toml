@@ -32,13 +32,16 @@ searxng_base_url = ""
 exa_live_crawl = false
 
 # Exa 密钥（可选升级，不是必需）：注册地址 https://dashboard.exa.ai/api-keys
-# （国内直连可达，建议邮箱注册）；免费档每月刷新约 $10 ≈ 1400 次。
-# 更推荐在插件面板里填写并一键测试；这里只显示 exa****尾4位。
-exa_api_key = ""
+# （国内直连可达，建议邮箱注册）；每个账号免费档每月刷新约 $10 ≈ 1400 次。
+# 一个账号不够用就把多个账号的密钥都列进来：一次搜索从上一把成功的开始，报错
+# 就顺延下一把，走到末尾再绕回开头 —— 没有计时器，循环本身就是重试节奏：
+#   exa_api_keys = ["sk-a-第一个账号", "sk-b-第二个账号"]
+# 更推荐在插件面板里逐把填写与测试；面板/日志都只显示 exa****尾4位。
+exa_api_keys = []
 # auto=永远用快路径（advanced 实测 3.7–11.7s 会顶穿 12s 预算，只在明确需要时选）
 exa_tool = "auto"
-# 密钥无效/额度用尽时，本次搜索自动降级为匿名档（不填密钥也能搜）
-exa_key_fallback_anonymous = true
+# 开关：整池密钥都报错时要不要再降级成匿名档（关闭则直接改用其它搜索来源）
+exa_key_fallback_anonymous = false
 # baidu 先领 BAIDUID cookie 再搜（不领基本必撞“百度安全验证”）
 baidu_warmup = true
 # 没检测到任何代理时，duckduckgo 不进实际链路（直连只会超时报错）

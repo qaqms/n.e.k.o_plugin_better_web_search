@@ -53,12 +53,21 @@ type LastSearchState = {
   code?: string
 }
 
+type ExaKeyCard = {
+  fingerprint?: string
+  masked?: string
+  state?: string
+  current?: boolean
+}
+
 type PanelState = {
   onboarding_stage?: string
+  exa_keys?: ExaKeyCard[]
   exa_key_masked?: string
   exa_key_source?: string
   exa_key_state?: string
   exa_last_error?: string
+  key_fallback?: boolean
   chain?: string[]
   effective_chain?: string[]
   proxy_mode?: string
@@ -214,6 +223,10 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   const stage = localStage || stageOf(safeState.onboarding_stage)
   const maskedKey = asString(safeState.exa_key_masked, "")
   const keyState = asString(safeState.exa_key_state, "unknown").toLowerCase()
+  const keyCards: ExaKeyCard[] = Array.isArray(safeState.exa_keys) ? safeState.exa_keys : []
+  const usableKeys = keyCards.filter((card) => card.state !== "invalid" && card.state !== "exhausted").length
+  const keyFallbackKnown = typeof safeState.key_fallback === "boolean"
+  const keyFallback = asBool(safeState.key_fallback, false)
   const lastError = asString(safeState.exa_last_error, "")
   const proxyDetected = asBool(safeState.proxy_detected, false)
   const withProxy = dualPathDraft === "" ? proxyDetected : dualPathDraft === "on"
@@ -318,7 +331,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
       return
     }
     setKeyError("")
-    const result = await runAction("save_exa_key", { key: value }, "save", 60000)
+    const result = await runAction("save_exa_key", { api_key: value }, "save", 60000)
     if (!result) return
     const ok = resultOk(result)
     const message = resultMessage(result) || (ok ? t("panel.messages.keySaved") : t("panel.messages.keySaveFailed"))
@@ -380,6 +393,26 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     setKeyDraft("")
     setReplaceOpen(false)
     await refreshContext(ok ? "trial" : "")
+  }
+
+  async function removeOneKey(card: ExaKeyCard): Promise<void> {
+    const accepted = await confirm({
+      title: t("panel.confirm.oneTitle"),
+      message: t("panel.confirm.oneMessage", { masked: asString(card.masked, "-") }),
+      tone: "danger",
+      confirmLabel: t("panel.confirm.removeOk"),
+      cancelLabel: t("panel.actions.cancel"),
+    })
+    if (!accepted) return
+    const result = await runAction(
+      "remove_exa_key", { fingerprint: asString(card.fingerprint, "") }, "clear")
+    if (!result) return
+    const ok = resultOk(result)
+    const message = resultMessage(result) || (ok ? t("panel.messages.keyRemoved") : t("panel.messages.keyRemoveFailed"))
+    showNotice(message, !ok)
+    if (ok) toast.success(message)
+    else toast.error(message)
+    await refreshContext()
   }
 
   async function toggleHostSearch(enabled: boolean): Promise<void> {
@@ -487,6 +520,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     if (!maskedKey) return <StatusBadge tone="warning" label={t("panel.key.notSaved")} />
     if (keyState === "valid") return <StatusBadge tone="success" label={t("panel.key.valid")} />
     if (keyState === "invalid") return <StatusBadge tone="danger" label={t("panel.key.invalid")} />
+    if (keyState === "exhausted") return <StatusBadge tone="warning" label={t("panel.key.spent")} />
     return <StatusBadge tone="info" label={t("panel.key.unknown")} />
   }
 
@@ -540,21 +574,71 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     )
   }
 
+  function keyCardBadge(card: ExaKeyCard) {
+    const state = asString(card.state, "unknown").toLowerCase()
+    if (state === "invalid") return <StatusBadge tone="danger" label={t("panel.key.invalid")} />
+    if (state === "exhausted") return <StatusBadge tone="warning" label={t("panel.key.spent")} />
+    if (state === "ok") return <StatusBadge tone="success" label={t("panel.key.valid")} />
+    return <StatusBadge tone="info" label={t("panel.key.unknown")} />
+  }
+
+  async function toggleKeyFallback(value: boolean): Promise<void> {
+    const result = await runAction("set_key_fallback", { enabled: value }, "fallback")
+    if (!result) return
+    const ok = resultOk(result)
+    const message = resultMessage(result) || (ok ? t("panel.messages.fallbackSaved") : t("panel.messages.fallbackFailed"))
+    showNotice(message, !ok)
+    if (ok) toast.success(message)
+    else toast.error(message)
+    await refreshContext()
+  }
+
   function renderKeyCard() {
     return (
       <Card title={t("panel.done.title")}>
         <Stack>
           <Grid cols={2}>
-            <StatCard label={t("panel.key.label")} value={maskOrDash(maskedKey)} />
+            <StatCard
+              label={t("panel.key.label")}
+              value={keyCards.length ? t("panel.keys.count", {
+                usable: usableKeys, total: keyCards.length,
+              }) : maskOrDash(maskedKey)}
+            />
             <StatCard label={t("panel.key.stateLabel")} value={keyBadge()} />
           </Grid>
-          <Text>{t("panel.done.line1")}</Text>
-          {stage === "trial" && !maskedKey ? <Alert tone="info">{t("panel.trial.line1")}</Alert> : null}
+          {!keyCards.length ? <Text>{t("panel.trial.line1")}</Text> : null}
+          {keyCards.map((card, index) => (
+            <Inline key={asString(card.fingerprint, String(index))} gap={3} wrap justify="space-between">
+              <Inline gap={2} wrap>
+                <Text>{asString(card.masked, "-")}</Text>
+                {keyCardBadge(card)}
+                {card.current ? <Text>{t("panel.keys.current")}</Text> : null}
+              </Inline>
+              <Button
+                tone="danger"
+                disabled={busy("clear") || !canCall("remove_exa_key")}
+                onClick={() => removeOneKey(card)}
+              >
+                {t("panel.actions.removeOne")}
+              </Button>
+            </Inline>
+          ))}
+          <Switch
+            checked={keyFallback}
+            label={t("panel.key.fallbackLabel")}
+            disabled={busy("fallback") || !keyFallbackKnown || !canCall("set_key_fallback")}
+            onChange={(value) => toggleKeyFallback(value)}
+          />
+          <Accordion id="keys-help" title={t("panel.keys.helpTitle")} open={false}>
+            <Text>{t("panel.keys.help")}</Text>
+            <Text>{t("panel.key.fallbackHelp")}</Text>
+            <Text>{quotaNote}</Text>
+          </Accordion>
           {lastError ? <Alert tone="warning">{lastError}</Alert> : null}
           {replaceOpen ? renderKeyField("panel.guide.keyField.placeholderReplace") : null}
           <Inline gap={3} wrap>
             <Button tone="info" disabled={busy("test") || !canCall("test_exa_key")} onClick={testKey}>
-              {label("test", "panel.actions.test")}
+              {label("test", "panel.actions.testAll")}
             </Button>
             <Button
               tone="primary"
@@ -565,11 +649,11 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
                 setReplaceOpen(true)
               }}
             >
-              {t("panel.actions.replace")}
+              {t("panel.actions.addKey")}
             </Button>
             {replaceOpen ? (
               <Button tone="success" disabled={busy("save") || !canCall("save_exa_key")} onClick={saveKey}>
-                {label("save", "panel.actions.saveReplacement")}
+                {label("save", "panel.actions.saveKey")}
               </Button>
             ) : null}
             {replaceOpen ? (
@@ -585,9 +669,11 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
                 {t("panel.actions.cancel")}
               </Button>
             ) : null}
-            <Button tone="danger" disabled={busy("clear") || !canCall("clear_exa_key")} onClick={removeKey}>
-              {label("clear", "panel.actions.remove")}
-            </Button>
+            {keyCards.length ? (
+              <Button tone="danger" disabled={busy("clear") || !canCall("clear_exa_key")} onClick={removeKey}>
+                {label("clear", "panel.actions.clearAll")}
+              </Button>
+            ) : null}
             <Button tone="default" disabled={busy("guide") || !canCall("show_guide")} onClick={openGuide}>
               {label("guide", "panel.actions.showGuide")}
             </Button>

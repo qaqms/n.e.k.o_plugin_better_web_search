@@ -23,6 +23,7 @@ resilience = conftest.load("_resilience")
 BetterWebSearchPlugin = entries.BetterWebSearchPlugin
 ApiKeyRejectedError = resilience.ApiKeyRejectedError
 QuotaExhaustedError = resilience.QuotaExhaustedError
+SearchProviderError = resilience.SearchProviderError
 
 # A realistic-shaped "secret": anything the plugin echoes must never contain it.
 SECRET = "sk-exa-live-0123456789abcdef9b2c"
@@ -73,6 +74,28 @@ class FakeCtx:
         self.statuses.append(status)
 
 
+class FakeStore:
+    """The smallest thing [plugin.store] needs to look like: async get/set."""
+
+    def __init__(self, *, enabled: bool = True, fail: bool = False) -> None:
+        self.enabled = enabled
+        self.fail = fail
+        self.values: dict[str, object] = {}
+        self.writes = 0
+
+    async def get(self, key, default=None):
+        if self.fail:
+            raise OSError("store down")
+        return entries.Ok(self.values.get(key, default))
+
+    async def set(self, key, value):
+        self.writes += 1
+        if self.fail:
+            raise OSError("store down")
+        self.values[key] = value
+        return entries.Ok(None)
+
+
 def make_plugin(search: dict | None = None, *, net_: dict | None = None,
                 ui_: dict | None = None, host_: dict | None = None,
                 data: dict | None = None) -> BetterWebSearchPlugin:
@@ -93,6 +116,10 @@ def make_plugin(search: dict | None = None, *, net_: dict | None = None,
     plugin._key_state = "unknown"
     plugin._quota_state = ""
     plugin._exa_last_error = ""
+    plugin._key_health = {}
+    plugin._key_at = ""
+    plugin._key_at_saved = ""
+    plugin.store = FakeStore()
     plugin._last_search = None
     plugin.config = FakeConfig(data)
     sections = plugin._sections
@@ -363,7 +390,7 @@ def _install_key_error(monkeypatch, error, anonymous_ok=True):
 
 def test_invalid_key_retries_anonymous_exactly_once(monkeypatch) -> None:
     calls = _install_key_error(monkeypatch, ApiKeyRejectedError("web_search_exa error (401): Invalid API key"))
-    plugin = make_plugin({"exa_api_key": SECRET})
+    plugin = make_plugin({"exa_api_keys": [SECRET], "exa_key_fallback_anonymous": True})
     results = plugin._fetcher("exa", "q", 3, 5.0)()
     assert results == exa_results()
     assert calls == [SECRET, ""]            # once keyed, once anonymous -- no more
@@ -374,7 +401,7 @@ def test_invalid_key_retries_anonymous_exactly_once(monkeypatch) -> None:
 
 def test_quota_error_marks_quota_and_degrades(monkeypatch) -> None:
     calls = _install_key_error(monkeypatch, QuotaExhaustedError("402 Payment Required", 30.0))
-    plugin = make_plugin({"exa_api_key": SECRET})
+    plugin = make_plugin({"exa_api_keys": [SECRET], "exa_key_fallback_anonymous": True})
     assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
     assert calls == [SECRET, ""]
     assert plugin._quota_state == "exhausted"
@@ -384,30 +411,10 @@ def test_anonymous_retry_happens_only_once(monkeypatch) -> None:
     # Anonymous tier failing must NOT trigger a second retry -- it propagates
     # so the chain fallback moves to the next backend.
     calls = _install_key_error(monkeypatch, ApiKeyRejectedError("401"), anonymous_ok=False)
-    plugin = make_plugin({"exa_api_key": SECRET})
+    plugin = make_plugin({"exa_api_keys": [SECRET], "exa_key_fallback_anonymous": True})
     with pytest.raises(resilience.BlockedError):
         plugin._fetcher("exa", "q", 3, 5.0)()
     assert len(calls) == 2
-
-
-def test_fallback_disabled_raises_sanitised_key_error(monkeypatch) -> None:
-    calls = _install_key_error(monkeypatch, ApiKeyRejectedError("401"))
-    plugin = make_plugin({"exa_api_key": SECRET, "exa_key_fallback_anonymous": False})
-    with pytest.raises(ApiKeyRejectedError) as info:
-        plugin._fetcher("exa", "q", 3, 5.0)()
-    assert calls == [SECRET]                              # no retry at all
-    assert SECRET not in str(info.value)                  # upstream/ key text stripped
-    assert "密钥无效" in str(info.value)
-    assert _error_code_for(info.value) == "BETTER_WEB_SEARCH_KEY_INVALID"
-
-
-def test_quota_fallback_disabled_raises_quota_code(monkeypatch) -> None:
-    _install_key_error(monkeypatch, QuotaExhaustedError("402", 60.0))
-    plugin = make_plugin({"exa_api_key": SECRET, "exa_key_fallback_anonymous": False})
-    with pytest.raises(QuotaExhaustedError) as info:
-        plugin._fetcher("exa", "q", 3, 5.0)()
-    assert _error_code_for(info.value) == "BETTER_WEB_SEARCH_QUOTA"
-    assert getattr(info.value, "retry_after_seconds", None) == 60.0
 
 
 def test_valid_key_marks_state_and_no_retry(monkeypatch) -> None:
@@ -420,7 +427,7 @@ def test_valid_key_marks_state_and_no_retry(monkeypatch) -> None:
         return exa_results()
 
     monkeypatch.setattr(providers, "search_exa", good)
-    plugin = make_plugin({"exa_api_key": SECRET})
+    plugin = make_plugin({"exa_api_keys": [SECRET]})
     assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
     assert calls == [SECRET]
     assert plugin._key_state == "valid"
@@ -431,21 +438,354 @@ def _error_code_for(error: BaseException) -> str:
 
 
 # ---------------------------------------------------------------------------
+# D2. the Exa key ring: one spent account must not end the search
+# ---------------------------------------------------------------------------
+
+KEY_A = "sk-exa-pool-aaaa-1111"
+KEY_B = "sk-exa-pool-bbbb-2222"
+KEY_C = "sk-exa-pool-cccc-3333"
+
+POOL = {"exa_api_keys": [KEY_A, KEY_B, KEY_C]}
+
+
+def _finger(plugin, key: str) -> str:
+    return BetterWebSearchPlugin._key_fingerprint(key)
+
+
+def _install_pool(monkeypatch, failures: dict[str, Exception]):
+    """Fake Exa that fails only for the keys named in ``failures``."""
+    seen: list[str] = []
+
+    def fake(query, limit, *, timeout, policy, proxy_url, live_crawl=False,
+             api_key="", tool="auto"):
+        seen.append(api_key)
+        error = failures.get(api_key)
+        if error is not None:
+            raise error
+        return exa_results()
+
+    monkeypatch.setattr(providers, "search_exa", fake)
+    return seen
+
+
+def test_spent_key_yields_to_the_next_one(monkeypatch) -> None:
+    seen = _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402 Payment Required")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [KEY_A, KEY_B]                   # B answered; the 402 never surfaced
+    assert plugin._key_health[_finger(plugin, KEY_A)] == "exhausted"
+    assert plugin._key_health[_finger(plugin, KEY_B)] == "ok"
+
+
+def test_the_next_search_starts_where_the_last_one_succeeded(monkeypatch) -> None:
+    """This is the whole point of the ring: nobody re-tries a key every single time."""
+    seen = _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin._fetcher("exa", "q", 3, 5.0)()
+    seen.clear()
+    assert plugin._fetcher("exa", "q2", 3, 5.0)() == exa_results()
+    assert seen == [KEY_B]
+
+
+def test_the_ring_wraps_back_to_the_first_key(monkeypatch) -> None:
+    """No timers: going all the way round is the retry schedule."""
+    seen = _install_pool(monkeypatch, {})
+    plugin = make_plugin(POOL)
+    plugin._key_at = _finger(plugin, KEY_C)         # C answered last time
+    assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [KEY_C]                          # the pass starts at C and stops there
+    plugin._fetcher("exa", "q2", 3, 5.0)()
+    assert seen == [KEY_C, KEY_C]                   # still C: nothing forced it sideways
+
+
+def test_a_key_that_failed_once_is_reached_again_after_a_full_pass(monkeypatch) -> None:
+    seen = _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    for index in range(4):
+        seen.clear()
+        assert plugin._fetcher("exa", f"q{index}", 3, 5.0)() == exa_results()
+    assert seen == [KEY_B]                          # B is still the only one that works
+    assert plugin._key_at == _finger(plugin, KEY_B)
+
+
+def test_keyed_429_rotates_without_blaming_the_key(monkeypatch) -> None:
+    """Exa throttles per account, so the next account is a real way out.
+
+    A 429 must not leave an "out of credits" verdict: one fast double-click would
+    otherwise report a healthy account as spent.
+    """
+    seen = _install_pool(monkeypatch, {KEY_A: resilience.BlockedError("Exa 请求过于频繁（429）")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [KEY_A, KEY_B]
+    assert _finger(plugin, KEY_A) not in plugin._key_health   # a throttle is no verdict
+    assert plugin._key_health[_finger(plugin, KEY_B)] == "ok"
+    assert plugin._quota_state == ""
+
+
+def test_a_garbled_answer_rotates_without_blaming_the_key(monkeypatch) -> None:
+    """Anything that answered is worth a step sideways -- 5xx included.
+
+    The ring used to rotate only on 401/402/429, so one server-side hiccup ended
+    Exa for that search while healthy accounts sat untried. A wrong answer is not
+    a verdict on the key either: only 401/402 may leave a mark.
+    """
+    seen = _install_pool(monkeypatch, {
+        KEY_A: SearchProviderError("Exa 返回了无法解析的响应")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [KEY_A, KEY_B]
+    assert _finger(plugin, KEY_A) not in plugin._key_health
+
+
+def test_a_hang_rotates_nothing_and_hands_exa_to_the_cooldown(monkeypatch) -> None:
+    """No answer at all is nobody's key's fault, and stepping sideways cannot help.
+
+    Each hang costs the per-backend timeout, and the first backend in the chain
+    holds the entire 25 s budget: rotating would burn the pool and still leave
+    nothing for anysearch / bing behind it. So one hang exits the pass as the one
+    error class the coordinator cools down, and no key gets blamed or spent.
+    """
+    seen = _install_pool(monkeypatch, {KEY_A: net.NetworkError("请求超时")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B, KEY_C]})
+    plugin._key_at = _finger(plugin, KEY_A)
+    with pytest.raises(resilience.BlockedError) as info:
+        plugin._fetcher("exa", "q", 3, 5.0)()
+    assert str(info.value) == entries._MSG_EXA_UNREACHABLE
+    assert seen == [KEY_A]                            # B and C never billed
+    assert plugin._key_at == _finger(plugin, KEY_A)   # a hang moves nothing
+    assert not plugin._key_health
+
+
+def test_a_keyless_hang_cools_exa_down_too(monkeypatch) -> None:
+    """A fresh install pays that timeout once, not once per search."""
+    def time_out(query, limit, *, timeout, policy, proxy_url, live_crawl=False,
+                 api_key="", tool="auto"):
+        raise net.NetworkError("网络不可达: timed out")
+
+    monkeypatch.setattr(providers, "search_exa", time_out)
+    plugin = make_plugin({})
+    with pytest.raises(resilience.BlockedError):
+        plugin._fetcher("exa", "q", 3, 5.0)()
+
+
+def test_a_key_removed_outside_the_panel_loses_its_verdict(monkeypatch) -> None:
+    """Hand-editing exa_api_keys skips the remove button's cleanup.
+
+    The cards are rebuilt from the pool so the panel never showed the ghost, but
+    the stale fingerprint stayed in memory for the life of the plugin.
+    """
+    _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin._fetcher("exa", "q", 3, 5.0)()
+    assert plugin._key_health == {_finger(plugin, KEY_A): "ok"}
+    plugin._sections["search"]["exa_api_keys"] = [KEY_B]
+    cards = plugin._build_panel_context({"exists": True})["exa_keys"]
+    assert [card["fingerprint"] for card in cards] == [_finger(plugin, KEY_B)]
+    assert cards[0]["state"] == "unknown"
+    assert plugin._key_health == {}
+
+
+def test_whole_ring_failed_falls_back_to_anonymous_only_when_told_to(monkeypatch) -> None:
+    spent = {key: QuotaExhaustedError("402") for key in (KEY_A, KEY_B)}
+    seen = _install_pool(monkeypatch, spent)
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B], "exa_key_fallback_anonymous": True})
+    assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [KEY_A, KEY_B, ""]               # every key had its turn, then anonymous
+    context = plugin._build_panel_context({"exists": True, "running": False})
+    assert [card["state"] for card in context["exa_keys"]] == ["exhausted", "exhausted"]
+    assert context["exa_key_state"] == "exhausted"
+
+
+def test_ring_failed_with_the_switch_off_hands_exa_to_the_penalty_box(monkeypatch) -> None:
+    """Default behaviour: a spent pool goes to the next backend, not to anonymous.
+
+    It must arrive as ``BlockedError`` -- that class is what puts the backend in
+    the coordinator cooldown, which is how "do not re-hammer a dead pool" holds.
+    """
+    spent = {key: QuotaExhaustedError("402") for key in (KEY_A, KEY_B)}
+    seen = _install_pool(monkeypatch, spent)
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    with pytest.raises(resilience.BlockedError) as info:
+        plugin._fetcher("exa", "q", 3, 5.0)()
+    assert seen == [KEY_A, KEY_B]                   # no anonymous attempt at all
+    assert "限流" in str(info.value)
+    assert _error_code_for(info.value) == "BETTER_WEB_SEARCH_BLOCKED"
+
+
+def test_a_single_spent_key_without_fallback_does_not_search_anonymously(monkeypatch) -> None:
+    seen = _install_pool(monkeypatch, {KEY_A: ApiKeyRejectedError("401 Invalid API key")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A]})
+    with pytest.raises(resilience.BlockedError):
+        plugin._fetcher("exa", "q", 3, 5.0)()
+    assert seen == [KEY_A]
+    assert plugin._key_state == "invalid"
+    assert SECRET not in plugin._exa_last_error     # fixed copy, never upstream text
+
+
+def test_anonymous_tier_failing_still_propagates(monkeypatch) -> None:
+    seen = _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402"),
+                                        "": resilience.BlockedError("Exa 免配额已用完（429）")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A], "exa_key_fallback_anonymous": True})
+    with pytest.raises(resilience.BlockedError):
+        plugin._fetcher("exa", "q", 3, 5.0)()
+    assert seen == [KEY_A, ""]                      # exactly one anonymous try
+
+
+def test_a_fresh_install_still_searchs_anonymously(monkeypatch) -> None:
+    seen = _install_pool(monkeypatch, {})
+    plugin = make_plugin()
+    assert plugin._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [""]
+
+
+def test_pool_never_leaks_a_key_into_panel_context_or_logs(monkeypatch) -> None:
+    _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402 Payment Required")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin._fetcher("exa", "q", 3, 5.0)()
+    context = plugin._build_panel_context({"exists": True, "running": False})
+    dumped = json.dumps(context, ensure_ascii=False)
+    for key in (KEY_A, KEY_B):
+        assert key not in dumped
+        assert key not in plugin.logger.blob()
+    # The point of the pool -- which account answered -- is still visible.
+    assert context["exa_keys"][0]["masked"].endswith(KEY_A[-4:])
+
+
+def test_the_fallback_switch_is_a_panel_button_that_persists(monkeypatch) -> None:
+    """The user asked for a control, not a config key they have to type."""
+    data = {"search": {"exa_key_fallback_anonymous": False}, "net": {}, "ui": {}, "host": {}}
+    plugin = make_plugin(data=data)
+    result = asyncio.run(plugin.set_key_fallback(enabled=True))
+    assert result.is_ok()
+    assert data["search"]["exa_key_fallback_anonymous"] is True
+    assert result.value["enabled"] is True
+    assert plugin._build_panel_context({"exists": False})["key_fallback"] is True
+    asyncio.run(plugin.set_key_fallback(enabled=False))
+    assert data["search"]["exa_key_fallback_anonymous"] is False
+    assert plugin._build_panel_context({"exists": False})["key_fallback"] is False
+
+
+async def _search_once(plugin, query: str = "猫娘 官网"):
+    """One real trip through the backend dispatch (coordinator included)."""
+    outcome = await plugin._search_once("exa", query, 3, 20.0)
+    return outcome["results"]
+
+
+def test_the_ring_position_survives_a_reload(monkeypatch) -> None:
+    """The reason the position is stored at all: a restart must not reset the ring."""
+    seen = _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402 Payment Required")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    store = plugin.store
+    assert asyncio.run(_search_once(plugin)) == exa_results()
+    assert seen == [KEY_A, KEY_B]
+    assert store.values["exa_key_ring"] == {"at": _finger(plugin, KEY_B)}
+
+    # A fresh instance (restart) restores it and never touches the spent key again.
+    seen.clear()
+    revived = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    revived.store = store
+    asyncio.run(revived._load_key_ring())
+    assert revived._key_at == _finger(plugin, KEY_B)
+    assert revived._fetcher("exa", "q", 3, 5.0)() == exa_results()
+    assert seen == [KEY_B]
+
+
+def test_the_position_is_written_only_when_the_ring_actually_moves(monkeypatch) -> None:
+    _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    for index in range(3):
+        assert asyncio.run(_search_once(plugin, f"猫娘 官网 {index}")) == exa_results()
+    assert plugin.store.writes == 1              # one key, three searches
+
+
+def test_a_pooled_ring_moves_the_pointer_once_per_spent_key(monkeypatch) -> None:
+    seen = _install_pool(monkeypatch, {KEY_A: QuotaExhaustedError("402"),
+                                        KEY_B: QuotaExhaustedError("402")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B, KEY_C]})
+    assert asyncio.run(_search_once(plugin)) == exa_results()
+    assert seen == [KEY_A, KEY_B, KEY_C]
+    assert plugin.store.values["exa_key_ring"] == {"at": _finger(plugin, KEY_C)}
+    assert plugin.store.writes == 1
+
+
+def test_a_missing_store_never_breaks_a_search(monkeypatch) -> None:
+    """The KV layer is the host's; Exa must still answer when it is not there."""
+    seen = _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A]})
+    plugin.store = FakeStore(enabled=False)
+    assert asyncio.run(_search_once(plugin)) == exa_results()
+    asyncio.run(plugin._save_key_ring())
+    asyncio.run(plugin._load_key_ring())
+    assert seen == [KEY_A]
+    assert plugin.store.writes == 0
+
+
+def test_a_failing_store_is_logged_and_ignored(monkeypatch) -> None:
+    _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A]})
+    plugin.store = FakeStore(fail=True)
+    assert asyncio.run(_search_once(plugin)) == exa_results()
+    assert plugin._key_at == _finger(plugin, KEY_A)     # in-memory ring still advanced
+
+
+def test_a_stored_key_that_was_removed_does_not_move_the_ring(monkeypatch) -> None:
+    _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin.store.values["exa_key_ring"] = {"at": "deadbeef"}
+    asyncio.run(plugin._load_key_ring())
+    assert plugin._key_at == ""                          # falls back to the first key
+    assert plugin._key_start(plugin._exa_keys()) == 0
+
+
+def test_removing_the_current_key_clears_the_pointer(monkeypatch) -> None:
+    _install_pool(monkeypatch, {})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin._key_at = plugin._key_at_saved = _finger(plugin, KEY_A)   # as a save would leave it
+    plugin.store.values["exa_key_ring"] = {"at": _finger(plugin, KEY_A)}
+    asyncio.run(plugin.remove_exa_key(fingerprint=_finger(plugin, KEY_A)))
+    assert plugin._key_at == ""
+    assert plugin.store.values["exa_key_ring"] == {"at": ""}
+
+
+def test_a_verified_key_becomes_the_starting_point(monkeypatch) -> None:
+    def good(query, limit, *, timeout, policy, proxy_url, live_crawl=False,
+             api_key="", tool="auto"):
+        return exa_results()
+
+    monkeypatch.setattr(providers, "search_exa", good)
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    plugin._key_at = _finger(plugin, KEY_A)
+    asyncio.run(plugin.save_exa_key(api_key=KEY_C))
+    assert plugin._key_at == _finger(plugin, KEY_C)
+    assert plugin.store.values["exa_key_ring"] == {"at": _finger(plugin, KEY_C)}
+
+
+def test_fingerprint_is_a_short_stable_hash_not_the_key() -> None:
+    finger = BetterWebSearchPlugin._key_fingerprint(KEY_A)
+    assert len(finger) == 8 and KEY_A not in finger
+    assert finger == BetterWebSearchPlugin._key_fingerprint(KEY_A)
+    assert finger != BetterWebSearchPlugin._key_fingerprint(KEY_B)
+
+
+# ---------------------------------------------------------------------------
 # E. panel context structure + no plaintext key anywhere
 # ---------------------------------------------------------------------------
 
 CONTEXT_KEYS = {
-    "onboarding_stage", "exa_key_masked", "exa_key_source", "exa_key_state",
+    "onboarding_stage", "exa_keys", "exa_key_masked", "exa_key_source", "exa_key_state",
     "exa_last_error", "chain", "effective_chain", "proxy_mode", "proxy_detected",
-    "host_search", "ssrf_fake_ip", "quota_note", "takeover", "takeover_error",
+    "host_search", "ssrf_fake_ip", "key_fallback", "quota_note", "takeover", "takeover_error",
     "last_search",
 }
+
+KEY_CARD_KEYS = {"fingerprint", "masked", "state", "current"}
 
 
 def test_panel_context_shape_and_mask(monkeypatch) -> None:
     monkeypatch.setattr(net, "system_proxy_present", lambda: False)
     plugin = make_plugin(
-        {"exa_api_key": SECRET, "backend_chain": ["exa", "duckduckgo", "anysearch", "bing"]},
+        {"exa_api_keys": [SECRET], "backend_chain": ["exa", "duckduckgo", "anysearch", "bing"]},
         ui_={"onboarding_stage": "trial"},
     )
     context = plugin._build_panel_context({"exists": True, "running": True, "toggleable": True})
@@ -453,7 +793,11 @@ def test_panel_context_shape_and_mask(monkeypatch) -> None:
     assert context["onboarding_stage"] == "trial"
     assert context["exa_key_masked"] == f"exa****{TAIL}"
     assert context["exa_key_source"] == "config"
+    # Nothing has been tried yet, so the honest answer is "unknown", not "valid".
     assert context["exa_key_state"] == "unknown"
+    assert [set(card) for card in context["exa_keys"]] == [KEY_CARD_KEYS]
+    assert context["exa_keys"][0]["state"] == "unknown"
+    assert context["exa_keys"][0]["current"] is True
     assert context["chain"] == ["exa", "duckduckgo", "anysearch", "bing"]
     assert context["effective_chain"] == ["exa", "anysearch", "bing"]
     assert context["proxy_mode"] == "auto"
@@ -587,7 +931,7 @@ def test_panel_context_entry_returns_plain_dict_and_survives_host_failure(monkey
             raise OSError("host api down")
 
     monkeypatch.setattr(entries._host, "HostPluginControl", Boom)
-    plugin = make_plugin({"exa_api_key": SECRET})
+    plugin = make_plugin({"exa_api_keys": [SECRET]})
     context = asyncio.run(plugin.panel_context())
     assert isinstance(context, dict)                      # context, not Ok()
     assert context["host_search"] == {"exists": False, "running": False, "toggleable": True}
@@ -599,7 +943,8 @@ def test_no_plaintext_key_in_any_return_or_log(monkeypatch) -> None:
     # tier answers. Neither the Ok payload nor any logged line may contain the
     # key (the host logs plugin status/results verbatim).
     calls = _install_key_error(monkeypatch, ApiKeyRejectedError("web_search_exa error (401): Invalid API key"))
-    plugin = make_plugin({"exa_api_key": SECRET, "backend_chain": ["exa"]})
+    plugin = make_plugin({"exa_api_keys": [SECRET], "backend_chain": ["exa"],
+                          "exa_key_fallback_anonymous": True})
     outcome = asyncio.run(plugin.search(query="猫娘计划 官网", max_results=3))
     assert outcome.is_ok() and calls == [SECRET, ""]
     blob = json.dumps(outcome.value, ensure_ascii=False, default=str) + plugin.logger.blob()
@@ -634,7 +979,7 @@ class _LostAckConfig(FakeConfig):
 
 
 def _lost_ack_plugin(*, land: bool) -> BetterWebSearchPlugin:
-    data = {"search": {"backend_chain": ["exa"], "exa_api_key": ""},
+    data = {"search": {"backend_chain": ["exa"], "exa_api_keys": []},
             "net": {}, "ui": {}, "host": {}}
     plugin = make_plugin()
     plugin.config = _LostAckConfig(data, land=land)
@@ -643,14 +988,14 @@ def _lost_ack_plugin(*, land: bool) -> BetterWebSearchPlugin:
 
 def test_persist_accepts_a_write_whose_acknowledgement_was_lost() -> None:
     plugin = _lost_ack_plugin(land=True)
-    assert asyncio.run(plugin._persist({"search": {"exa_api_key": SECRET}})) is True
-    assert plugin._text("exa_api_key") == SECRET
+    assert asyncio.run(plugin._persist({"search": {"exa_api_keys": [SECRET]}})) is True
+    assert plugin._list_in("search", "exa_api_keys", ()) == [SECRET]
 
 
 def test_persist_still_fails_when_the_value_never_lands() -> None:
     plugin = _lost_ack_plugin(land=False)
-    assert asyncio.run(plugin._persist({"search": {"exa_api_key": SECRET}})) is False
-    assert plugin._text("exa_api_key") == ""
+    assert asyncio.run(plugin._persist({"search": {"exa_api_keys": [SECRET]}})) is False
+    assert plugin._exa_keys() == []
 
 
 def test_save_exa_key_reports_success_when_only_the_ack_is_lost(monkeypatch) -> None:
@@ -661,7 +1006,7 @@ def test_save_exa_key_reports_success_when_only_the_ack_is_lost(monkeypatch) -> 
         return True, 120, 3, "密钥可用：120 ms 返回 3 条结果", ""
 
     monkeypatch.setattr(plugin, "_verify_exa_key", fake_verify)
-    outcome = asyncio.run(plugin.save_exa_key(key=SECRET))
+    outcome = asyncio.run(plugin.save_exa_key(api_key=SECRET))
     assert outcome.is_ok() and outcome.value["ok"] is True
     assert "没能保存" not in outcome.value["message"]
     assert SECRET not in json.dumps(outcome.value, ensure_ascii=False)
@@ -674,14 +1019,14 @@ def test_save_exa_key_still_says_no_when_the_write_really_failed(monkeypatch) ->
         return True, 120, 3, "密钥可用", ""
 
     monkeypatch.setattr(plugin, "_verify_exa_key", fake_verify)
-    outcome = asyncio.run(plugin.save_exa_key(key=SECRET))
+    outcome = asyncio.run(plugin.save_exa_key(api_key=SECRET))
     assert outcome.is_ok()                        # the search itself still works
     assert outcome.value["ok"] is False           # but the key is not stored
     assert "没能保存" in outcome.value["message"]
 
 
 def _stage_plugin(stage: str) -> BetterWebSearchPlugin:
-    return make_plugin({"backend_chain": ["exa"], "exa_api_key": SECRET},
+    return make_plugin({"backend_chain": ["exa"], "exa_api_keys": [SECRET]},
                        ui_={"onboarding_stage": stage})
 
 
@@ -698,7 +1043,7 @@ def test_verified_key_finishes_the_guide_persistently(monkeypatch) -> None:
     stage was cleared by its own refresh, so the guide came back every open."""
     _verify_stub(monkeypatch, "")
     plugin = _stage_plugin("trial")
-    asyncio.run(plugin.save_exa_key(key=SECRET))
+    asyncio.run(plugin.save_exa_key(api_key=SECRET))
     assert plugin.config.data["ui"]["onboarding_stage"] == "done"
     assert plugin._text_in("ui", "onboarding_stage") == "done"
 
@@ -706,7 +1051,7 @@ def test_verified_key_finishes_the_guide_persistently(monkeypatch) -> None:
 def test_rejected_key_leaves_the_guide_where_it_was(monkeypatch) -> None:
     _verify_stub(monkeypatch, "key")
     plugin = _stage_plugin("trial")
-    asyncio.run(plugin.save_exa_key(key=SECRET))
+    asyncio.run(plugin.save_exa_key(api_key=SECRET))
     assert plugin.config.data["ui"]["onboarding_stage"] == "trial"
 
 
@@ -728,15 +1073,15 @@ def test_save_exa_key_persists_reloads_and_reports_masked(monkeypatch) -> None:
     monkeypatch.setattr(providers, "search_exa", good)
     data = {"search": {}, "net": {}, "ui": {}, "host": {}}
     plugin = make_plugin(data=data)
-    result = asyncio.run(plugin.save_exa_key(key="sk-new-key-abcd"))
+    result = asyncio.run(plugin.save_exa_key(api_key="sk-new-key-abcd"))
     assert result.is_ok()
     payload = result.value
     assert payload["ok"] is True
     assert payload["masked"] == "exa****abcd"
     assert payload["count"] == 1
     assert isinstance(payload["latency_ms"], int)
-    assert data["search"]["exa_api_key"] == "sk-new-key-abcd"   # written to disk
-    assert plugin._cfg["exa_api_key"] == "sk-new-key-abcd"      # and reloaded in-process
+    assert data["search"]["exa_api_keys"] == ["sk-new-key-abcd"]   # written to disk
+    assert plugin._cfg["exa_api_keys"] == ["sk-new-key-abcd"]      # and reloaded in-process
     assert plugin._key_state == "valid"
     assert "sk-new-key-abcd" not in json.dumps(payload)
 
@@ -749,11 +1094,11 @@ def test_save_exa_key_bad_key_saves_but_marks_invalid(monkeypatch) -> None:
     monkeypatch.setattr(providers, "search_exa", reject)
     data = {"search": {}, "net": {}, "ui": {}, "host": {}}
     plugin = make_plugin(data=data)
-    result = asyncio.run(plugin.save_exa_key(key=SECRET))
+    result = asyncio.run(plugin.save_exa_key(api_key=SECRET))
     payload = result.value
     assert payload["ok"] is False
     assert payload["key_state"] == "invalid"
-    assert data["search"]["exa_api_key"] == SECRET              # saved anyway (contract)
+    assert data["search"]["exa_api_keys"] == [SECRET]              # saved anyway (contract)
     assert SECRET not in json.dumps(payload)
     assert payload["masked"] == f"exa****{TAIL}"
 
@@ -761,18 +1106,76 @@ def test_save_exa_key_bad_key_saves_but_marks_invalid(monkeypatch) -> None:
 def test_clear_and_test_exa_key_without_key(monkeypatch) -> None:
     monkeypatch.setattr(providers, "search_exa",
                         lambda *a, **k: pytest.fail("must not search without a key"))
-    data = {"search": {"exa_api_key": SECRET}, "net": {}, "ui": {}, "host": {}}
+    data = {"search": {"exa_api_keys": [SECRET]}, "net": {}, "ui": {}, "host": {}}
     plugin = make_plugin(data=data)
     cleared = asyncio.run(plugin.clear_exa_key())
-    assert cleared.is_ok() and data["search"]["exa_api_key"] == ""
-    assert plugin._cfg["exa_api_key"] == "" and plugin._key_state == "unknown"
+    assert cleared.is_ok() and data["search"]["exa_api_keys"] == []
+    assert plugin._cfg["exa_api_keys"] == [] and plugin._key_state == "unknown"
     tested = asyncio.run(plugin.test_exa_key())
     assert tested.is_ok() and tested.value["ok"] is False and tested.value["count"] == 0
 
 
 def test_save_exa_key_rejects_empty(monkeypatch) -> None:
     plugin = make_plugin()
-    assert asyncio.run(plugin.save_exa_key(key="  ")).is_err()
+    assert asyncio.run(plugin.save_exa_key(api_key="  ")).is_err()
+
+
+def test_adding_a_key_that_is_already_there_does_not_double_it(monkeypatch) -> None:
+    def good(query, limit, *, timeout, policy, proxy_url, live_crawl=False,
+             api_key="", tool="auto"):
+        return exa_results()
+
+    monkeypatch.setattr(providers, "search_exa", good)
+    data = {"search": {"exa_api_keys": [SECRET]}, "net": {}, "ui": {}, "host": {}}
+    plugin = make_plugin(data=data)
+    result = asyncio.run(plugin.save_exa_key(api_key=SECRET))
+    assert result.is_ok()
+    assert data["search"]["exa_api_keys"] == [SECRET]
+    assert result.value["key_count"] == 1
+
+
+def test_remove_exa_key_drops_only_that_one(monkeypatch) -> None:
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    finger = plugin._key_fingerprint(KEY_A)
+    plugin._key_health[finger] = "exhausted"
+    result = asyncio.run(plugin.remove_exa_key(fingerprint=finger))
+    assert result.is_ok()
+    assert plugin._exa_keys() == [KEY_B]
+    assert not plugin._key_health                     # its record went with it
+    assert result.value["key_count"] == 1
+
+
+def test_remove_exa_key_rejects_an_unknown_fingerprint(monkeypatch) -> None:
+    plugin = make_plugin({"exa_api_keys": [KEY_A]})
+    assert asyncio.run(plugin.remove_exa_key(fingerprint="deadbeef")).is_err()
+    assert plugin._exa_keys() == [KEY_A]
+
+
+def test_test_exa_key_reports_each_key_separately(monkeypatch) -> None:
+    _install_pool(monkeypatch, {KEY_B: QuotaExhaustedError("402 Payment Required")})
+    plugin = make_plugin({"exa_api_keys": [KEY_A, KEY_B]})
+    result = asyncio.run(plugin.test_exa_key())
+    payload = result.value
+    assert payload["ok"] is True and payload["usable"] == 1 and payload["key_count"] == 2
+    assert [row["kind"] for row in payload["keys"]] == ["", "quota"]
+    assert [row["masked"] for row in payload["keys"]] == [
+        plugin._mask_key(KEY_A), plugin._mask_key(KEY_B)]
+    assert KEY_A not in json.dumps(payload, ensure_ascii=False)
+    assert KEY_B not in json.dumps(payload, ensure_ascii=False)
+    cards = plugin._build_panel_context({"exists": True})["exa_keys"]
+    assert [card["state"] for card in cards] == ["ok", "exhausted"]
+
+
+def test_a_network_failure_during_retest_leaves_the_key_verdict_alone(monkeypatch) -> None:
+    def time_out(query, limit, *, timeout, policy, proxy_url, live_crawl=False,
+                 api_key="", tool="auto"):
+        raise net.NetworkError("连接超时")
+
+    monkeypatch.setattr(providers, "search_exa", time_out)
+    plugin = make_plugin({"exa_api_keys": [KEY_A]})
+    asyncio.run(plugin.test_exa_key())
+    assert not plugin._key_health            # unreachable Exa says nothing about the key
+    assert plugin._exa_key_cards()[0]["state"] == "unknown"
 
 
 # ---------------------------------------------------------------------------

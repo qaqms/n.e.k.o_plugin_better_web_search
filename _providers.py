@@ -274,7 +274,10 @@ def _mcp_error(message: str, *, status: int | None = None,
     if status == 429:
         if not api_key:
             raise BlockedError("Exa 免配额已用完（429）", retry_after_seconds)
-        raise QuotaExhaustedError(text[:200], retry_after_seconds)
+        # Exa answers 402 when credits are spent and 429 when we only asked too
+        # fast (docs/reference/billing). A keyed 429 that reads as "out of
+        # credits" lets one fast double-click mark a healthy key as dead.
+        raise BlockedError("Exa 请求过于频繁（429）", retry_after_seconds)
     if status == 402 or _QUOTA_STATUS_RE.search(lowered) or any(
         marker in lowered for marker in _QUOTA_TEXT_MARKERS
     ):

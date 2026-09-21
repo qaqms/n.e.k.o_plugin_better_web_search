@@ -253,13 +253,35 @@ def test_mcp_http_402_becomes_quota_exhausted(monkeypatch) -> None:
     assert caught.value.retry_after_seconds == 18.0
 
 
-def test_mcp_keyed_rate_limit_becomes_quota_exhausted(monkeypatch) -> None:
+def test_mcp_keyed_rate_limit_stays_a_throttle_not_a_spent_key(monkeypatch) -> None:
+    """429 means "ask slower"; only 402 may ever mark a key as out of credits.
+
+    A keyed 429 that raised ``QuotaExhaustedError`` would let one double-click
+    report a healthy key as spent, which is how key rotation mis-parks keys.
+    """
     import pytest
 
     class Fake:
         status = 429
         body = b"too many"
         retry_after_seconds = 4.0
+
+    monkeypatch.setattr(providers._net, "post", lambda *a, **k: Fake())
+    with pytest.raises(providers.BlockedError) as caught:
+        providers._mcp_call("web_search_exa", {"query": "x"}, timeout=5,
+                            policy="none", proxy_url="", api_key="key")
+    assert caught.value.retry_after_seconds == 4.0
+    assert not isinstance(caught.value, providers.QuotaExhaustedError)
+
+
+def test_mcp_keyed_credit_exhaustion_is_still_quota(monkeypatch) -> None:
+    """The 402 half of the pair: this one *is* the key being out of credits."""
+    import pytest
+
+    class Fake:
+        status = 402
+        body = b"payment required"
+        retry_after_seconds = None
 
     monkeypatch.setattr(providers._net, "post", lambda *a, **k: Fake())
     with pytest.raises(providers.QuotaExhaustedError):

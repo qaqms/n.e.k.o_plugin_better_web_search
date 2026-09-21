@@ -261,7 +261,16 @@ def classify_error(exc: BaseException | None) -> tuple[str, str]:
     if isinstance(exc, QuotaExhaustedError):
         return "quota", _NOTE_QUOTA
     if isinstance(exc, BlockedError):
-        return "blocked", _NOTE_BLOCKED
+        # The key ring reports an Exa pass that never got an answer as
+        # ``BlockedError`` too, because that is the one class the backend cooldown
+        # punishes. Saying 反爬 there would send the user off to change backends
+        # over a socket that is simply dead.
+        if _is_timeout_text(text):
+            return "timeout", _NOTE_TIMEOUT
+        # A throttle and an anti-scrape page share the class but not the advice:
+        # "quota" reads as 额度或频率受限, while "blocked" blames 反爬 and tells
+        # the user to abandon a backend that only asked too fast.
+        return ("quota", _NOTE_BUSY) if _is_busy_text(text) else ("blocked", _NOTE_BLOCKED)
     if isinstance(exc, CooldownError):
         return "blocked", _NOTE_COOLDOWN
     if isinstance(exc, BusyError):
