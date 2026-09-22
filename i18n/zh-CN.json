@@ -43,7 +43,7 @@
   "panel.quota.fallback": "不填密钥也能用：走公共免费额度，但更慢、限额低、偶尔抽风。",
 
   "panel.actions.saveKey": "保存并使用",
-  "panel.actions.addKey": "再加一把",
+  "panel.actions.addKey": "加一把",
   "panel.actions.testAll": "重测全部",
   "panel.actions.testOne": "测这把",
   "panel.actions.clearAll": "清空全部",
@@ -83,7 +83,7 @@
   "panel.exa.title": "Exa 密钥（可选，多把轮着用）",
   "panel.exa.accRegister": "怎么拿到一把 Exa 密钥",
   "panel.exa.step2.title": "第 2 步：粘进这张卡的输入框",
-  "panel.exa.pasteLine": "点「再加一把」，在框里 Ctrl+V 整段粘贴，前后别留空格。",
+  "panel.exa.pasteLine": "点「加一把」，在框里 Ctrl+V 整段粘贴，前后别留空格。",
   "panel.exa.step3.title": "第 3 步：保存并使用",
   "panel.exa.saveLine": "点「保存并使用」，插件会立刻拿它真搜一次验货：成功就优先走 Exa；失败会说明原因，并自动改用公共免费额度，不会因此搜不到东西。",
   "panel.key.label": "密钥池",

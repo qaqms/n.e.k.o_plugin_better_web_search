@@ -111,7 +111,7 @@ _ERROR_CODES = {
 }
 
 # User-facing copy. Never interpolate raw upstream text or the key here.
-_MSG_KEY_INVALID = "Exa 密钥没验通过：这把已跳过，请到面板重新填写或再加一把"
+_MSG_KEY_INVALID = "Exa 密钥没验通过：这把已跳过，请到面板重新填写或加一把"
 _MSG_QUOTA = "Exa 密钥额度已用尽：这把已跳过，池里还有别的钥匙就接着用，额度每月自动刷新"
 # Raised once the whole ring failed: wording lands in the "限流" bucket of the
 # self-check, which is what a dead pool actually looks like from the outside.

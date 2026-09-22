@@ -43,7 +43,7 @@
   "panel.quota.fallback": "It works without a key too: the shared free tier, but slower, with lower limits, and it acts up now and then.",
 
   "panel.actions.saveKey": "Save and use",
-  "panel.actions.addKey": "Add another key",
+  "panel.actions.addKey": "Add a key",
   "panel.actions.testAll": "Retest all",
   "panel.actions.testOne": "Test this key",
   "panel.actions.clearAll": "Clear all",
@@ -83,7 +83,7 @@
   "panel.exa.title": "Exa keys (optional, several rotate)",
   "panel.exa.accRegister": "How to get an Exa key",
   "panel.exa.step2.title": "Step 2: paste it into this card's box",
-  "panel.exa.pasteLine": "Tap \"Add another key\", click into the box and paste the whole thing with Ctrl+V. No spaces before or after.",
+  "panel.exa.pasteLine": "Tap \"Add a key\", click into the box and paste the whole thing with Ctrl+V. No spaces before or after.",
   "panel.exa.step3.title": "Step 3: save and use it",
   "panel.exa.saveLine": "Tap \"Save and use\" — the plugin runs one live search to check it. If it works, Exa becomes the preferred source; if not, it tells you why and keeps using the shared free tier, so search never breaks.",
   "panel.key.label": "Key pool",
