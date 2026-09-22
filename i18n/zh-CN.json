@@ -24,7 +24,7 @@
   "panel.guide.step1.title": "第 1 步：注册并拿到密钥",
   "panel.guide.step1.line1": "打开这个网址（国内可以直接打开，不用挂代理）：",
   "panel.guide.step1.line1b": "打不开就复制到浏览器地址栏，手动打开。",
-  "panel.guide.step1.line2": "登录选 Continue with Email（Continue with Google 在国内打不开）。QQ 邮箱、163 邮箱都行；半天收不到信，先去垃圾邮件里翻一下。",
+  "panel.guide.step1.line2": "登录选邮箱登录。QQ 邮箱、163 邮箱都行；半天收不到信，先去垃圾邮件里翻一下。",
   "panel.guide.step1.line3": "登录后点 Create API Key，生成一串密钥，整段复制。页面上写的 API Key 就是这里的“密钥”。",
   "panel.guide.step1.qIntro": "注册完邮箱，Exa 会连着问你三个问题。照下面选就能进控制台，选错了也不影响密钥、不影响额度：",
   "panel.guide.step1.q1": "What are you coding with? —— 随便选一个。",
@@ -120,9 +120,6 @@
   "panel.chain.title": "现在会用到哪些搜索来源",
   "panel.chain.empty": "暂时没查到可用的搜索来源，等插件启动完成后点「刷新面板」。",
   "panel.chain.proxyLine": "代理方式：{mode}",
-  "panel.chain.accHow": "为什么少了某个来源 · 额度怎么算",
-  "panel.chain.duckHidden": "duckduckgo 现在不在里面：检测到你在用代理才会把它加进来，国内直连它基本搜不到东西。",
-  "panel.chain.duckShown": "检测到你在用代理，duckduckgo 已经作为备用来源加进来了。",
 
   "panel.last.title": "最近一次搜索",
   "panel.last.none": "还没有搜索记录。说句「搜一下 …」，再回来点【刷新面板】。",

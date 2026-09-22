@@ -864,10 +864,6 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
             <Text>{t("panel.chain.empty")}</Text>
           )}
           <Text>{t("panel.chain.proxyLine", { mode: proxyMode })}</Text>
-          <Accordion id="chain-how" title={t("panel.chain.accHow")} open={false}>
-            <Text>{proxyDetected ? t("panel.chain.duckShown") : t("panel.chain.duckHidden")}</Text>
-            <Text>{quotaNote}</Text>
-          </Accordion>
         </Stack>
       </Card>
     )

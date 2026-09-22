@@ -24,7 +24,7 @@
   "panel.guide.step1.title": "Step 1: register and get your key",
   "panel.guide.step1.line1": "Open this address (reachable directly, no proxy needed):",
   "panel.guide.step1.line1b": "If it will not open, copy it and paste it into your browser address bar.",
-  "panel.guide.step1.line2": "Choose Continue with Email (Continue with Google does not work in mainland China). Any QQ or 163 mailbox works; if no mail arrives, check the spam folder first.",
+  "panel.guide.step1.line2": "Choose to sign in with e-mail. Any QQ or 163 mailbox works; if no mail arrives, check the spam folder first.",
   "panel.guide.step1.line3": "After logging in, click Create API Key, then copy the whole string. The \"API Key\" on that page is the key this panel means.",
   "panel.guide.step1.qIntro": "After the e-mail sign-up, Exa asks three questions. Answer them like this and you land in the console; picking differently costs you no key and no quota:",
   "panel.guide.step1.q1": "What are you coding with? — pick anything.",
@@ -120,9 +120,6 @@
   "panel.chain.title": "Search sources in use",
   "panel.chain.empty": "No usable search source yet. Wait for the plugin to finish starting, then tap \"Refresh panel\".",
   "panel.chain.proxyLine": "Proxy mode: {mode}",
-  "panel.chain.accHow": "Why is a source missing · how the quota works",
-  "panel.chain.duckHidden": "duckduckgo is not in the list right now: it only gets added when a proxy is detected, because direct connections in mainland China mostly get nothing from it.",
-  "panel.chain.duckShown": "A proxy was detected, so duckduckgo was added as a spare source.",
 
   "panel.last.title": "Latest search",
   "panel.last.none": "Nothing recorded yet. Ask her to search for something, then tap [Refresh panel].",

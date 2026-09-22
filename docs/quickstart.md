@@ -20,7 +20,7 @@
 
 https://dashboard.exa.ai/api-keys
 
-- 登录方式请选 **Continue with Email**。页面上还有 **Continue with Google**，但国内 Google 用不了，别在它上面浪费时间。
+- 登录方式选**邮箱登录**（按钮上写的是 Continue with Email）。QQ 邮箱、163 邮箱都能收验证信；半天没收到先去垃圾邮件里翻一下。
 - 邮箱用 **QQ 邮箱 / 163 邮箱都可以**。等了一会儿没收到信，先去**垃圾邮件**里翻一下。
 - 登录后点 **Create API Key**，生成一串密钥，**整段复制**下来。页面上写的 "API Key" 就是这里说的"密钥"。
 
