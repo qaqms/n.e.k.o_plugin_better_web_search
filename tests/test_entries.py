@@ -109,6 +109,7 @@ def make_plugin(search: dict | None = None, *, net_: dict | None = None,
     plugin.ctx = FakeCtx()
     plugin.logger = FakeLogger()
     plugin._cfg = {}
+    plugin._retired_chain_noted = False
     plugin._sections = {name: {} for name in entries.CONFIG_SECTIONS}
     plugin._coordinators = {}
     plugin._key_state = "unknown"
@@ -140,6 +141,32 @@ def test_default_chain_matches_plan() -> None:
     plugin = make_plugin()
     assert plugin._chain() == ["anysearch", "exa", "bing", "baidu"]
     assert list(entries.DEFAULT_CHAIN) == ["anysearch", "exa", "bing", "baidu"]
+
+
+def test_a_pinned_retired_default_chain_reads_as_unset() -> None:
+    """The host copies config.example.toml once at install and never rewrites an existing
+    file (config_paths.py:148-153), so an upgrader keeps pinning the order that was
+    default on their install day and no changed default ever reaches them."""
+    plugin = make_plugin({"backend_chain": list(entries.RETIRED_DEFAULT_CHAIN)})
+    assert plugin._chain() == list(entries.DEFAULT_CHAIN)
+    assert plugin._ordered_chain() == ["anysearch", "exa", "bing", "baidu"]
+    plugin._chain()
+    plugin._chain()
+    assert sum("retired default" in line for line in plugin.logger.lines) == 1
+
+
+def test_a_hand_written_order_stays_authoritative() -> None:
+    # Only the exact retired default is discarded. Anything else -- including a
+    # deliberately exa-first list -- is the user's own and must keep winning.
+    plugin = make_plugin({"backend_chain": ["exa", "bing", "baidu"]})
+    assert plugin._chain() == ["exa", "bing", "baidu"]
+
+
+def test_the_backend_preference_outranks_the_retired_chain_alias() -> None:
+    """Wanting Exa first has a first-class knob; un-pinning must not take it away."""
+    plugin = make_plugin({"backend_chain": list(entries.RETIRED_DEFAULT_CHAIN),
+                          "backend": "exa"})
+    assert plugin._ordered_chain()[0] == "exa"
 
 
 def test_only_an_unpaired_exa_pool_takes_the_head() -> None:
@@ -238,10 +265,12 @@ def _stub_backends(plugin, monkeypatch, failing: set[str], attempted: list[str])
 
 def test_configured_backend_is_promoted_in_the_reported_chain(monkeypatch) -> None:
     monkeypatch.setattr(net, "system_proxy_present", lambda: False)
+    # Deliberately not RETIRED_DEFAULT_CHAIN: that exact list now reads as unset, and
+    # this test is about the [search] backend preference promotion, not about the alias.
     plugin = make_plugin({"backend": "bing",
-                          "backend_chain": ["exa", "anysearch", "bing", "baidu"]})
-    assert plugin._ordered_chain() == ["bing", "exa", "anysearch", "baidu"]
-    assert plugin._effective_chain() == ["bing", "exa", "anysearch", "baidu"]
+                          "backend_chain": ["exa", "bing", "baidu", "anysearch"]})
+    assert plugin._ordered_chain() == ["bing", "exa", "baidu", "anysearch"]
+    assert plugin._effective_chain() == ["bing", "exa", "baidu", "anysearch"]
 
 
 def test_configured_backend_keeps_falling_back(monkeypatch) -> None:

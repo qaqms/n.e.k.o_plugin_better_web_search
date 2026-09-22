@@ -73,6 +73,16 @@ from ._resilience import (
 #   sogou      no parseable results on the test network: implemented, never default.
 DEFAULT_CHAIN = ("anysearch", "exa", "bing", "baidu")
 
+# The host copies config.example.toml into the plugin's runtime config **once**, at first
+# install, and never touches an existing file again (config_paths.py:148-153). So every
+# install keeps the chain order that was current when it was installed, and changing the
+# default reaches nobody who already installed: a 0.9.6-era user pinned
+# RETIRED_DEFAULT_CHAIN in their own file and kept leading with keyless Exa forever.
+# Treating exactly that list as "never chosen" un-pins them. Any other order is a hand
+# edit and stays authoritative; wanting Exa first has a first-class knob anyway
+# ([search] backend = "exa"), which _ordered_chain() still honours over this.
+RETIRED_DEFAULT_CHAIN = ("exa", "anysearch", "bing", "baidu")
+
 # Config sections the plugin reads; missing sections fall back to defaults so a
 # v0.1 install (which only has [search]) keeps working untouched.
 CONFIG_SECTIONS = ("search", "net", "ui")
@@ -155,6 +165,10 @@ class BetterWebSearchPlugin(NekoPluginBase):
         self.logger = self.file_logger
         # [search] view; _num/_int/_text keep reading it (many call sites).
         self._cfg: Dict[str, Any] = {}
+        # One line per reload, not one per search: the retired-default alias is a
+        # fact about this config file, and a search-path log line would repeat it
+        # every query forever.
+        self._retired_chain_noted = False
         # All four sections, tolerant of missing ones (v0.1 configs, partial
         # user overrides). Written as a whole by _load_sections so a reload can
         # never leave a half-updated view.
@@ -271,6 +285,15 @@ class BetterWebSearchPlugin(NekoPluginBase):
         names: List[str] = []
         if isinstance(raw, list):
             names = [str(item).strip().lower() for item in raw if str(item).strip()]
+        if names == list(RETIRED_DEFAULT_CHAIN):
+            names = []
+            if not self._retired_chain_noted:
+                self._retired_chain_noted = True
+                self.logger.info(
+                    "backend_chain is the retired default {}, reading it as unset and "
+                    "using {}; delete that key, or set [search] backend, to decide by hand",
+                    list(RETIRED_DEFAULT_CHAIN), list(DEFAULT_CHAIN),
+                )
         if not names:
             names = list(DEFAULT_CHAIN)
         valid = {"exa", "anysearch", "bing", "sogou", "baidu", "duckduckgo", "searxng"}

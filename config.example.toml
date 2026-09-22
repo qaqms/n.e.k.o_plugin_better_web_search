@@ -9,6 +9,9 @@ auto_start = true
 # 唯一的例外：填了 exa_api_keys 而 anysearch_api_key 还空着 → exa 升到首位。
 backend = "auto"
 backend_chain = ["anysearch", "exa", "bing", "baidu"]
+# 装包时这份配置会整份复制过去，之后宿主不再改写它，所以老用户文件里可能还留着旧的
+# ["exa", "anysearch", "bing", "baidu"]。插件认出那一行时当作"没写过"，走上面的默认顺序；
+# 想自己定顺序就改成别的排列，只想让 exa 打头就把上面的 backend 填成 "exa"。
 # 对话里没指定条数时用这个值（上限 15）
 max_results = 6
 timeout_seconds = 12
