@@ -120,6 +120,38 @@ def test_block_word_inside_a_real_result_does_not_trigger() -> None:
 # --- hosted API envelopes ------------------------------------------------
 
 
+def test_anysearch_keyed_401_is_a_verdict_on_the_key(monkeypatch) -> None:
+    """With a key, 401/403 says the credential is bad; anonymously it says nothing."""
+    import pytest
+
+    def refuse(status: int):
+        def post(url, **kwargs):
+            raise providers._net.HttpStatusCodeError("denied", status)
+        return post
+
+    monkeypatch.setattr(providers._net, "post", refuse(401))
+    with pytest.raises(providers.ApiKeyRejectedError):
+        providers.search_anysearch("q", 3, timeout=5, policy="none", proxy_url="",
+                                   api_key="as-secret")
+    with pytest.raises(providers.SearchProviderError) as info:
+        providers.search_anysearch("q", 3, timeout=5, policy="none", proxy_url="", api_key="")
+    assert not isinstance(info.value, providers.ApiKeyRejectedError)
+    assert "as-secret" not in str(info.value)
+
+
+def test_anysearch_429_stays_a_throttle_and_keeps_the_wait_time(monkeypatch) -> None:
+    import pytest
+
+    def post(url, **kwargs):
+        raise providers._net.HttpStatusCodeError("slow down", 429, 7.5)
+
+    monkeypatch.setattr(providers._net, "post", post)
+    with pytest.raises(providers.BlockedError) as info:
+        providers.search_anysearch("q", 3, timeout=5, policy="none", proxy_url="",
+                                   api_key="as-secret")
+    assert info.value.retry_after_seconds == 7.5
+
+
 def test_anysearch_envelope_is_parsed_and_invalid_shapes_rejected() -> None:
     payload = {"results": [
         {"title": "猫娘计划", "url": "https://project-neko.cn/", "snippet": "开源 AI 伙伴",

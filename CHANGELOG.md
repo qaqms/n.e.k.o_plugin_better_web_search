@@ -27,6 +27,15 @@ Exa 的免费额度是**按账号**给的：注册送 $20，之后每个账号�
   别依赖这个后端"，把用户送去换后端而不是查网络；现在文案含"超时"的 `BlockedError` 先归到 timeout 桶，
   建议语仍是"多半需要代理，开代理后重测"。这条边界与"哪种错误该顺移"一起由
   `tests/test_entries.py::test_a_hang_rotates_nothing_and_hands_exa_to_the_cooldown` 等四条用例钉住。
+- **面板可以填与测试 anysearch 密钥了**（`set_anysearch_key` / `test_anysearch_key` / `clear_anysearch_key`）：
+  AnySearch 只认一把（配置里就是单个 `anysearch_api_key`，没有池子也没有环），所以只有"存 / 测 / 移除"三个动作，
+  不照搬 Exa 的逐把管理。点保存会**立刻拿它真搜一次**验货，四种结果分开处理：返回了结果=能用；
+  401/403=判这把无效（`_providers` 为此改抛 `ApiKeyRejectedError`，之前是笼统的 `SearchProviderError`，
+  面板分不出"密钥坏了"和"网络坏了"）；429=只说这次被限流、**不给这把下任何结论**；超时/连不上=不改状态。
+  后两条是同一条道理：一个没答上的请求不配把能用的密钥标成"没验通过"，否则用户会去重贴一把好的。
+  掩码是 `any****尾4位`（`_mask_key` 多了个前缀参数），面板、日志、状态上报一律不回显明文。
+  入口在「密钥管理」卡里默认收起的折叠块中，所以面板可见文案只涨到 1428/1560 字（最长的单条仍是 44/60 字），
+  中英键集仍一致（170 条）。
 - 手改 `exa_api_keys` 删掉的钥匙，其在内存里的显示状态现在也会在面板上下文重建时被裁掉（走面板"移除这把"
   本来就会清，漏的是手改配置这条路）。
 - **降级无 Key 变成了一个开关，默认关闭**（`exa_key_fallback_anonymous`，面板「密钥管理」里有对应按钮）：
@@ -93,8 +102,20 @@ Exa 的免费额度是**按账号**给的：注册送 $20，之后每个账号�
 - 新手引导第 1 步加折叠块「注册时它问的三个问题怎么选」：*What are you coding with?* 随便选、
   *What integration should the prompt generate?* 选 **mcp**、*What are you building?* 选 **Web search tool**，
   并写明选错不影响密钥也不影响额度（`docs/quickstart.md` 同步）。
-- 面板可见文案仍在门禁内：总计 1394/1560 字、引导 427/460 字、最长单条 44/60 字；中英键集仍一致（160 条）；
-  hosted-tsx 类型检查通过。
+- 面板可见文案仍在门禁内：总计 1428/1560 字、引导 427/460 字、最长单条 44/60 字；中英键集仍一致（170 条）。
+  这台机器上没有可用的 `tsc`，所以本轮新增的 anysearch 面板部分只是照着 `plugin/sdk/hosted-ui/index.d.ts`
+  逐个核对 props（`StatCard/Field/PasswordInput/Accordion/Button/StatusBadge`），**没有跑过类型检查**。
+
+- **默认链路改成 anysearch 打头**（`DEFAULT_CHAIN`、`plugin.toml`、`config.example.toml` 三处同批改）：
+  `anysearch → exa → bing → baidu`。exa 的免 Key 档是**所有匿名用户共用同一个池子**，问得快就是 429（代码里
+  那句「Exa 免配额已用完（429）」就是它），让整条链路的第一次尝试压在这个公共池上不划算。**唯一的例外**还是
+  exa：`exa_api_keys` 至少有一把、而 `anysearch_api_key` 还空着时它升到首位——这时它花的是用户自己账号的额度。
+  判据只看配置（`_exa_leads`），所以首位不会在一次会话中途变；"整池都用完"的让位仍由后端冷却负责。
+  `[search] backend` 显式选定引擎时优先于这条规则。这条边界由
+  `tests/test_entries.py::test_only_an_unpaired_exa_pool_takes_the_head`、
+  `test_explicit_backend_preference_outranks_the_key_rule`、`test_keyed_exa_is_actually_tried_first`，
+  以及 `tests/test_config_keys.py::test_shipped_backend_chain_is_the_code_default`
+  （三份清单不许各说一套顺序）钉住。
 
 ### 这一版还没在真机上验过的事
 
@@ -105,6 +126,10 @@ Exa 的免费额度是**按账号**给的：注册送 $20，之后每个账号�
 4. **"挂住就整趟结束"的预算推理是读码算的**（首后端独享 25 秒、单后端 timeout 12 秒），不是把网络真拔掉跑出来的。
 5. **后台核对的 20 秒节奏没在真机看过**：`/stop` 迟到这件事是日志证据，"下一轮核对能把它翻成已兑现"
    目前只有离线用例保证。真机要看的是：开机 20–40 秒后，面板上那句"回答太慢"应自动变成已停用。
+6. **首位分叉只跑过离线用例**：真机上要确认的是保存一把 Exa 密钥之后，面板「现在会用到哪些搜索来源」里
+   exa 的徽章确实排到第一个，且「最近一次搜索」显示这一轮由 exa 答的。
+7. **anysearch 那行面板从没渲染过**：新卡里的两个 StatCard、折叠块里的输入框与三个按钮（保存/测这把/移除）
+   都要起宿主装包看一遍；尤其要确认「移除」按钮只在已有密钥时才出现，以及折叠块展开后没把卡片撑得难读。
 
 ## v0.9.6（2026-09-20）
 

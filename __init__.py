@@ -61,16 +61,18 @@ from ._resilience import (
 
 # Default chain, measured on a real mainland desktop network with the proxy off
 # (plan-v0.2 §0; keep README's table in sync with these numbers):
-#   exa        public MCP gateway, keyless, direct 1.6-3.5s, returns page text  -> primary
-#   anysearch  keyless anonymous tier, direct 1.2-5.0s                          -> secondary
-#   bing       direct 0.6s, best Chinese + English HTML results                 -> default now
+#   anysearch  keyless anonymous tier, direct 1.2-5.0s                            -> primary
+#   exa        public MCP gateway, keyless, direct 1.6-3.5s, returns page text;
+#              the keyless tier is one shared pool, so it leads only when the user
+#              registers keys (_exa_leads) -- otherwise it stays second
+#   bing       direct 0.6s, best Chinese + English HTML results                   -> default now
 #   baidu      direct answers "百度安全验证" without a BAIDUID warm-up cookie;
-#              with warmup it is usable but IP-burst sensitive                  -> last
+#              with warmup it is usable but IP-burst sensitive                   -> last
 #   duckduckgo direct times out (DNS pollution), TLS EOF even via some proxies;
 #              it is NOT in the default chain and joins the *effective* chain
 #              only when a proxy is actually available (duckduckgo_needs_proxy).
 #   sogou      no parseable results on the test network: implemented, never default.
-DEFAULT_CHAIN = ("exa", "anysearch", "bing", "baidu")
+DEFAULT_CHAIN = ("anysearch", "exa", "bing", "baidu")
 
 # Config sections the plugin reads; missing sections fall back to defaults so a
 # v0.1 install (which only has [search]) keeps working untouched.
@@ -173,6 +175,10 @@ class BetterWebSearchPlugin(NekoPluginBase):
         # Restored at startup so a reload does not restart the rotation.
         self._key_at: str = ""
         self._key_at_saved: str = ""
+        # Same idea for the single optional AnySearch key: what AnySearch last said
+        # about it ("unknown"|"valid"|"invalid"). Display only -- the search works
+        # with or without this key, so nothing in the chain reads it.
+        self._any_key_state: str = "unknown"
         # Last good host-status read: (monotonic stamp, state dict). The panel
         # refreshes after every action; re-asking the host each time added seconds.
         self._host_state_cache: Optional[tuple] = None
@@ -281,18 +287,36 @@ class BetterWebSearchPlugin(NekoPluginBase):
                 ordered.append(name)
         return ordered or list(DEFAULT_CHAIN)
 
-    def _ordered_chain(self) -> List[str]:
-        """Configured chain with the preferred backend promoted to first place.
+    def _exa_leads(self) -> bool:
+        """True when Exa should take the first slot: its own keys, and no AnySearch key.
 
-        ``[search] backend`` is a *preference*, not a lock: a user who picks bing
-        still gets a result when bing is rate-limited. Locking to one engine is
-        the per-call ``backend`` argument's job (see _search_with_fallback).
+        Keyless Exa answers out of one pool every anonymous user shares (that is what
+        the "Exa 免配额已用完（429）" branch is), so it should not be the first thing a
+        search tries. A registered key spends the user's own allowance instead, which
+        is the only reason to put it in front.
+        """
+        if self._text("anysearch_api_key"):
+            return False
+        return bool(self._exa_keys())
+
+    def _ordered_chain(self) -> List[str]:
+        """Configured chain with the head backend promoted to first place.
+
+        The head is the explicit ``[search] backend`` preference when there is one,
+        else Exa when _exa_leads() holds, else the configured order as written (which
+        leads with anysearch). ``[search] backend`` is a *preference*, not a lock: a
+        user who picks bing still gets a result when bing is rate-limited. Locking to
+        one engine is the per-call ``backend`` argument's job (see
+        _search_with_fallback).
         """
         chain = self._chain()
         preferred = self._text("backend", "auto").lower()
-        if preferred in chain:
-            return [preferred] + [name for name in chain if name != preferred]
-        return chain
+        head = preferred if preferred in chain else ""
+        if not head and "exa" in chain and self._exa_leads():
+            head = "exa"
+        if not head:
+            return chain
+        return [head] + [name for name in chain if name != head]
 
     def _route_policy(self, route: str) -> tuple[str, str]:
         """Return ``(policy, proxy_url)`` for one backend route.
@@ -337,6 +361,11 @@ class BetterWebSearchPlugin(NekoPluginBase):
     def _exa_tool(self) -> str:
         tool = self._text("exa_tool", "auto").lower()
         return tool if tool in {"auto", "advanced", "simple"} else "auto"
+
+    def _anysearch_zone(self) -> str:
+        """AnySearch's zone argument, emptied for anything we do not send."""
+        zone = self._text("anysearch_zone").lower()
+        return zone if zone in {"cn", "intl"} else ""
 
     def _coordinator(self, name: str) -> SearchCoordinator:
         coordinator = self._coordinators.get(name)
@@ -714,11 +743,9 @@ class BetterWebSearchPlugin(NekoPluginBase):
 
             return call_exa
         if name == "anysearch":
-            zone = "cn" if self._text("anysearch_zone") == "cn" else (
-                "intl" if self._text("anysearch_zone") == "intl" else "")
             return lambda: _providers.search_anysearch(
                 query, limit, timeout=timeout, policy=policy, proxy_url=proxy_url,
-                api_key=self._text("anysearch_api_key"), zone=zone)
+                api_key=self._anysearch_key(), zone=self._anysearch_zone())
         if name == "searxng":
             return lambda: _providers.search_searxng(
                 query, limit, base_url=self._text("searxng_base_url"),
@@ -1072,14 +1099,14 @@ class BetterWebSearchPlugin(NekoPluginBase):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _mask_key(key: str) -> str:
-        """``exa****尾4位``; short keys keep nothing, empty keys mask to empty."""
+    def _mask_key(key: str, prefix: str = "exa") -> str:
+        """``前缀****尾4位``; short keys keep nothing, empty keys mask to empty."""
         text = str(key or "").strip()
         if not text:
             return ""
         if len(text) <= 4:
-            return "exa****"
-        return f"exa****{text[-4:]}"
+            return f"{prefix}****"
+        return f"{prefix}****{text[-4:]}"
 
     def _exa_key_cards(self) -> List[Dict[str, Any]]:
         """One masked row per configured key: its last verdict, and who is next.
@@ -1123,6 +1150,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
         """Pure context builder (structure frozen by plan §3, keys masked)."""
         chain = self._ordered_chain()
         cards = self._exa_key_cards()
+        any_key = self._anysearch_key()
         return {
             "onboarding_stage": self._text_in("ui", "onboarding_stage"),
             "exa_keys": cards,
@@ -1130,6 +1158,9 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "exa_key_source": "config" if cards else "none",
             "exa_key_state": self._exa_pool_state(cards),
             "exa_last_error": self._exa_last_error,
+            # One key, no ring: AnySearch takes a single credential.
+            "anysearch_key_masked": self._mask_key(any_key, "any"),
+            "anysearch_key_state": self._any_key_state if any_key else "none",
             "chain": chain,
             "effective_chain": self._effective_chain(),
             "proxy_mode": self._text("proxy", "auto"),
@@ -1290,6 +1321,55 @@ class BetterWebSearchPlugin(NekoPluginBase):
             # is -- and after a replace, the ring must not sit on the old one.
             self._key_at = finger
 
+    def _anysearch_key(self) -> str:
+        return self._text("anysearch_api_key")
+
+    async def _set_anysearch_key(self, key: str) -> bool:
+        return await self._persist({"search": {"anysearch_api_key": key}})
+
+    async def _verify_anysearch_key(self, key: str) -> tuple[bool, int, int, str, str]:
+        """One real search with ``key``. Returns (ok, ms, count, 中文文案, kind).
+
+        Same shape as _verify_exa_key: ``kind`` is "" | "key" | "limited" |
+        "network", and only "key" is a statement about the credential. The key
+        never appears in any returned text.
+        """
+        policy, proxy_url = self._route_policy("anysearch")
+        timeout = self._num("timeout_seconds", 12, 2, 30)
+        started = time.perf_counter()
+
+        def spent_ms() -> int:
+            return int((time.perf_counter() - started) * 1000)
+
+        try:
+            results = await _in_thread(
+                _providers.search_anysearch, "N.E.K.O 插件", 3,
+                timeout=timeout, policy=policy, proxy_url=proxy_url,
+                api_key=key, zone=self._anysearch_zone())
+        except ApiKeyRejectedError:
+            return False, spent_ms(), 0, "AnySearch 判定这个密钥无效：请重新粘贴（不填也能搜）", "key"
+        except BlockedError:
+            return False, spent_ms(), 0, "密钥没被判无效，但这次被限流：稍等几秒再测一次", "limited"
+        except Exception as error:
+            return (False, spent_ms(), 0,
+                    f"测试未完成（{type(error).__name__}）：密钥已保存，网络恢复后可再点测试",
+                    "network")
+        count = len([item for item in results if isinstance(item, dict)])
+        if not count:
+            return False, spent_ms(), 0, "密钥未被拒绝，但这次没搜到结果：可再试一次", "network"
+        return True, spent_ms(), count, f"密钥可用：{spent_ms()} ms 返回 {count} 条结果", ""
+
+    def _apply_any_verify_state(self, kind: str) -> None:
+        """Only what AnySearch itself decides may move this badge.
+
+        A busy window or a dead socket says nothing about the credential; a wrong
+        "没验通过" would have the user re-pasting a key that works.
+        """
+        if kind == "":
+            self._any_key_state = "valid"
+        elif kind == "key":
+            self._any_key_state = "invalid"
+
     @ui.action(label="添加密钥", icon="🔑", tone="success", group="exa", order=10)
     @plugin_entry(
         id="save_exa_key",
@@ -1431,6 +1511,75 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "message": (f"{usable}/{tested} 把可用" if tested else "太网不好：一把都没测成")
                        + ("" if tested == len(pool) else f"（另有 {len(pool) - tested} 把未测）"),
         })
+
+    @ui.action(label="保存 anysearch 密钥", icon="🔑", tone="success", group="any", order=10)
+    @plugin_entry(
+        id="set_anysearch_key",
+        name="保存 anysearch 密钥",
+        description="仅供面板调用：保存一把 AnySearch API Key 并立刻用一次真实搜索验证。"
+                    "验证没通过也会保存，只是那把会被标成没验通过；不填密钥也能匿名搜。",
+        timeout=20.0,
+        input_schema={
+            "type": "object",
+            "properties": {
+                "api_key": {"type": "string", "description": "从 AnySearch 控制台复制的密钥"},
+            },
+            "required": ["api_key"],
+        },
+    )
+    async def set_anysearch_key(self, api_key: str = "", **_):
+        text = str(api_key or "").strip()
+        if not text:
+            return Err(SdkError("请先在 AnySearch 控制台复制密钥，再粘贴到这里"))
+        saved = await self._set_anysearch_key(text)
+        ok, ms, count, message, kind = await self._verify_anysearch_key(text)
+        if saved:
+            self._apply_any_verify_state(kind)
+        else:
+            message = "密钥没能保存：宿主没有确认这次配置写入，请再点一次（不填密钥也能搜）"
+        return Ok({
+            "ok": bool(ok and saved),
+            "masked": self._mask_key(text, "any"),
+            "message": message,
+            "latency_ms": ms,
+            "count": count,
+            "key_state": self._any_key_state if saved else "unknown",
+        })
+
+    @ui.action(label="测这把密钥", icon="🧪", group="any", order=20)
+    @plugin_entry(
+        id="test_anysearch_key",
+        name="测试 anysearch 密钥",
+        description="仅供面板调用：拿已保存的 AnySearch 密钥真实搜索一次，刷新它的状态；不改配置。",
+        timeout=20.0,
+        input_schema={"type": "object", "properties": {}},
+    )
+    async def test_anysearch_key(self, **_):
+        key = self._anysearch_key()
+        if not key:
+            return Ok({"ok": False, "masked": "", "key_state": "none",
+                       "latency_ms": 0, "count": 0,
+                       "message": "还没有填写 anysearch 密钥；不填也能搜，走的是匿名档"})
+        ok, ms, count, message, kind = await self._verify_anysearch_key(key)
+        self._apply_any_verify_state(kind)
+        return Ok({"ok": bool(ok), "masked": self._mask_key(key, "any"),
+                   "key_state": self._any_key_state,
+                   "message": message, "latency_ms": ms, "count": count})
+
+    @ui.action(label="移除这把", icon="🗑", tone="danger", group="any", order=30, confirm=True)
+    @plugin_entry(
+        id="clear_anysearch_key",
+        name="移除 anysearch 密钥",
+        description="仅供面板调用：清空配置里的 AnySearch 密钥并回到匿名档，不碰 AnySearch 账号本身。",
+        timeout=15.0,
+        input_schema={"type": "object", "properties": {}},
+    )
+    async def clear_anysearch_key(self, **_):
+        if not await self._set_anysearch_key(""):
+            return Err(SdkError("移除失败：宿主没有确认这次配置写入，请重试"))
+        self._any_key_state = "unknown"
+        return Ok({"ok": True, "masked": "", "key_state": "none",
+                   "message": "已移除 anysearch 密钥，回到匿名档（不填也能搜）"})
 
     @ui.action(label="停用/启用内置搜索", icon="🔀", group="host", order=10, refresh_context=True)
     @plugin_entry(

@@ -25,6 +25,8 @@ SCOPED = re.compile(
 )
 # Per-backend overrides are read through f-strings, e.g. f"{route}_proxy".
 DYNAMIC_PATTERNS = (("_proxy", 'f"{route}_proxy"'), ("_method", 'f"{name}_method"'))
+# The code-side default chain, as written in __init__.py.
+DEFAULT_CHAIN_RE = re.compile(r"^DEFAULT_CHAIN = \(([^)]*)\)", re.MULTILINE)
 
 
 def _source() -> str:
@@ -87,3 +89,17 @@ def test_manifest_and_example_agree_on_the_same_key_set() -> None:
             f"[{section}] keys differ: only in plugin.toml={sorted(left - right)} "
             f"only in config.example.toml={sorted(right - left)}"
         )
+
+
+def test_shipped_backend_chain_is_the_code_default() -> None:
+    """Both manifests must ship the same order ``DEFAULT_CHAIN`` uses.
+
+    Which engine answers first is decided by that order, so a stale list in one
+    file gives a fresh install a different head than an empty config does.
+    """
+    declared = [item.strip().strip('"')
+                for item in DEFAULT_CHAIN_RE.search(_source()).group(1).split(",")
+                if item.strip()]
+    for name in ("plugin.toml", "config.example.toml"):
+        shipped = list(_toml(name)["search"]["backend_chain"])
+        assert shipped == declared, f"{name} ships {shipped}, code default is {declared}"

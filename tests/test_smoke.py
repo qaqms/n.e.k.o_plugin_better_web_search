@@ -10,6 +10,9 @@ PANEL_ENTRY_IDS = [
     "remove_exa_key",
     "clear_exa_key",
     "test_exa_key",
+    "set_anysearch_key",
+    "test_anysearch_key",
+    "clear_anysearch_key",
     "set_key_fallback",
     "set_host_search",
     "get_host_search",
@@ -368,7 +371,6 @@ def test_default_config_sections_present_in_example() -> None:
                 "duckduckgo_needs_proxy", "ssrf_allow_ranges", "onboarding_stage",
                 "first_run_notice_sent", "takeover_search"):
         assert key in example, f"config.example.toml missing {key}"
-    assert 'backend_chain = ["exa", "anysearch", "bing", "baidu"]' in example
 
 
 def test_name_is_the_same_everywhere() -> None:

@@ -4,10 +4,11 @@ auto_start = true
 
 [search]
 # 后端链路（全部免 API Key）：前一个失败自动换下一个。
-# 顺序按国内直连实测排：exa 1.6–3.5s、anysearch 1.2–5.0s、bing 0.6s；
+# 顺序：国内直连实测 anysearch 1.2–5.0s、exa 1.6–3.5s、bing 0.6s 都可用；
 # baidu 直连常撞“百度安全验证”（靠预热救），放最后；sogou 实测无结果，不启用。
+# 唯一的例外：填了 exa_api_keys 而 anysearch_api_key 还空着 → exa 升到首位。
 backend = "auto"
-backend_chain = ["exa", "anysearch", "bing", "baidu"]
+backend_chain = ["anysearch", "exa", "bing", "baidu"]
 # 对话里没指定条数时用这个值（上限 15）
 max_results = 6
 timeout_seconds = 12
@@ -26,6 +27,8 @@ baidu_proxy = "direct"
 duckduckgo_method = "POST"
 
 # 可选增强，留空也能用
+# 填了限额更高，不填走匿名档；有这把钥匙时 exa 不再升到链路首位。
+# 也可以在面板「密钥管理」的折叠块里填，保存时会当场真搜一次验货。
 anysearch_api_key = ""
 anysearch_zone = ""
 searxng_base_url = ""
@@ -38,6 +41,8 @@ exa_live_crawl = false
 # 一个账号不够用就把多个账号的密钥都列进来：一次搜索从上一把成功的开始，报错
 # 就顺延下一把，走到末尾再绕回开头 —— 没有计时器，循环本身就是重试节奏：
 #   exa_api_keys = ["sk-a-第一个账号", "sk-b-第二个账号"]
+# 填了它还有一个作用：anysearch_api_key 还空着时 exa 升到链路首位（只看配置，
+# 不会在一次会话中途改顺序；整池用完的让位由后端冷却负责）。
 # 更推荐在插件面板里逐把填写与测试；面板/日志都只显示 exa****尾4位。
 exa_api_keys = []
 # auto=永远用快路径（advanced 实测 3.7–11.7s 会顶穿 12s 预算，只在明确需要时选）
