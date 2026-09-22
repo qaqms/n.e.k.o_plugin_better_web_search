@@ -7,8 +7,10 @@ from pathlib import Path
 PANEL_ENTRY_IDS = [
     "panel_context",
     "save_exa_key",
+    "remove_exa_key",
     "clear_exa_key",
     "test_exa_key",
+    "set_key_fallback",
     "set_host_search",
     "get_host_search",
     "set_onboarding",
@@ -337,6 +339,23 @@ def test_every_panel_action_id_is_declared_as_an_entry() -> None:
     source = (root / "__init__.py").read_text(encoding="utf-8")
     for entry_id in PANEL_ENTRY_IDS:
         assert f'id="{entry_id}"' in source, f"missing plugin_entry id: {entry_id}"
+
+
+def test_panel_never_calls_an_action_id_outside_the_declared_set() -> None:
+    """The list above is hand-maintained, and it had already fallen behind.
+
+    ``remove_exa_key`` and ``set_key_fallback`` were wired into the panel without
+    appearing anywhere the guard looked, so a typo in either id would have shipped
+    silently. Derive what the panel actually calls and require the same of it.
+    """
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "__init__.py").read_text(encoding="utf-8")
+    tsx = (root / "ui" / "panel.tsx").read_text(encoding="utf-8")
+    called = set(re.findall(r'runAction\(\s*"([a-z_]+)"', tsx))
+    assert called, "the panel-action extractor stopped matching runAction()"
+    for entry_id in sorted(called):
+        assert f'id="{entry_id}"' in source, f"panel calls undeclared entry: {entry_id}"
+        assert entry_id in PANEL_ENTRY_IDS, f"{entry_id} called but not in PANEL_ENTRY_IDS"
 
 
 def test_default_config_sections_present_in_example() -> None:

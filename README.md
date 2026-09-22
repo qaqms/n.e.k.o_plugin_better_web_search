@@ -33,7 +33,7 @@
 - 计费口径：Exa 定价页写的是 *$7 per 1k requests (up to 10 results)*，**一次请求最多 10 条不加价**，超出部分另计 $1/1k。本插件走 `https://mcp.exa.ai/mcp` 的 `web_search_exa` 工具（带 Key 也是同一个端点，Key 放在 `x-api-key` 头），实测响应里 `costDollars.total = 0.007`，且 numResults 取 2/6/10 **同价**（`docs/plan-v0.2.md` §0）。所以 1400 次/月这个数只在"每次 ≤10 条"时成立；我们允许 `max_results` 到 15，模型要满 15 条的那次大约是 $0.012。
 - 不填 Key 照样能搜。填 Key 买到的是**额度确定性**，不是速度：实测 advanced 档 3.7–11.7s 会顶穿 12s 预算，所以 `exa_tool = "auto"` 恒用快路径（带不带 Key 都一样）。
 - **一把不够用就填多把（环形轮转，没有计时器）**：`exa_api_keys` 是一个列表，一个 Exa 账号一把 Key。一次搜索从**上一把成功的那把**开始，这把报错就顺延下一把，走到列表末尾再绕回开头。所以一把用坏的钥匙，要等其它每把都轮过一遍才会再被试一次——**循环本身就是重试节奏**，不需要额外记"歇到几点"。顺移的条件是**这把答得不对**（401 / 402 / 429、5xx、给了段解析不出来的响应）；**根本没答上**（超时、连不上）时不去撞下一把，见下条。
-- **重启不会把循环打回原点**：环停在哪儿，就按密钥的指纹记在宿主给插件的 KV 存储里，插件或软件重启后从同一把继续。只有位置真的移动时（也就是一把用坏时）才写一次；存储不可用只记日志，不影响搜索。
+- **重启不会把循环打回原点**：环停在哪儿，就按密钥的指纹记在宿主给插件的 KV 存储里，插件或软件重启后从同一把继续。只有位置真的移动时（也就是一把用坏时）才写一次；存储不可用只记日志，不影响搜索。落盘这个动作挂在**搜索**的收尾，`fetch` 走同一个环、也会挪内存里的起点，但不单独写存储，所以只读网页、没再搜过的话，重启最多退回上一次搜索记下的那把（偏一把，下一次搜索就校准了）。
 - **整池都报错、或 Exa 压根连不上 = 整条 Exa 链路进退避期**：这两种情况抛的都是 `BlockedError`，正好复用协调器已有的后端冷却（`cooldown_seconds`），下一次搜索不会把整个环再跑一遍，而是直接改走 anysearch / 必应。连不上时**一把都不多试**是有意的：首后端独享 `total_timeout_seconds` 这 25 秒，让 N 把钥匙各自挂满 12 秒的代价不是"慢一点"，是 anysearch 和必应一分预算都拿不到、这一轮真的搜不到东西。这条边界由 `tests/test_entries.py::test_a_hang_rotates_nothing_and_hands_exa_to_the_cooldown` 钉住。
 - **要不要降级成无 Key 是一个开关，默认关闭**：`exa_key_fallback_anonymous = false`。关掉的理由很实际——池子都空了时匿名档通常也不通，不如把 25 秒预算留给下一个后端。设为 `true` 时的行为是：整环跑完 → 匿名档试一次（只一次，不循环）→ 失败就交给后端链。
 - **401/403 会写明"这把没验通过"**，面板逐把显示状态；`fetch` 读正文走同一个环，不会刚在搜索里撞死、转头又拿它抓网页。
@@ -65,7 +65,8 @@
 >    同一套素材里的「梗 / 音乐」两类走别的通道，不受影响。
 >
 > 其余联网功能（B 站 / YouTube / Twitch 热搜与动态、一起看、网页正文）走自己的 httpx 通道，停用内置不影响。
-> 这两条的实际影响面也不大：主动聊天共 11 种信息源（`main_logic/proactive_chat/sources.py:104-459`），
+> 这两条的实际影响面也不大：主动聊天共 9 种信息源（`main_logic/proactive_chat/sources.py:313-455` 里 `_fetch_source`
+> 的九个 `mode` 分支：vision / news / community / video / window / home / personal / music / meme），
 > **只有 `window` 需要搜索，且它默认关闭**（`main_logic/proactive_chat/contracts.py:50`
 > `use_window_search: bool = False`）；主动话题的联网增强默认开着但**失败不阻断**，宿主自己的注释就写着
 > "Any failure leaves the cheap keyword floor hint intact"（`main_logic/topic/pipeline.py:962-966`），
@@ -74,11 +75,11 @@
 > （`plugin/server/application/plugins/registry_service.py:187-247`），但安装侧对 `action == "override_builtin"`
 > 的本地/zip 导入直接 409 拒绝（`plugin/server/application/plugin_cli/service.py:503-510`
 > `PLUGIN_BUILTIN_OVERRIDE_MARKET_REQUIRED`，原文 "builtin plugins can only be overridden by a SHA256-verified
-> Market package"），而且真走 Market 覆盖时包里不许带 `previous_ids`（`install_plan.py:320-321`）、
+> Market package"），而且真走 Market 覆盖时包里不许带 `previous_ids`（`install_plan.py:321-322`）、
 > 已有的 `plugin_runtime_overrides.json["web_search"].enabled=false` 还会把顶替者一起停掉。
 > 所以这两条只能等宿主把 `search_gateway.py:228` 的那个 id 改成可配置。
 > 另有一条容易误判的：**停用期间那两条路径不会污染宿主缓存**（`search_gateway.py` 里 `_store()` 只有一个调用点
-> `:460`，只在"插件跑完了但没结果"时写），插件停着时是抛异常并给该后端上 300 秒失败冷却（`:369-373`、`:345-347`）。
+> `:460`，只在"插件跑完了但没结果"时写），插件停着时是抛异常并给该后端上 300 秒失败冷却（`:370-373`、`:345-347`）。
 > 所以把内置开回来之后头几分钟还是空，是**在冷却里**，不是缓存脏了。
 > 要是你依赖上面那两条，就别在这里停用内置，或者去宿主侧把它改成可插拔。
 >
@@ -255,7 +256,7 @@ node /tmp/tscpkg/node_modules/typescript/bin/tsc -p /tmp/tsx-check/tsconfig.json
 
 > `-c tests/pytest.ini` 不能省：本仓库根目录就是插件包（有 `__init__.py`），pytest 8/9 会为 rootdir 到用例之间的每层目录建 Package 节点并去 import 根 `__init__.py`，而插件独立检出时它无法作为包被导入，全部用例会在 setup 阶段集体 CollectError。把 rootdir 收进 `tests/` 就没这个节点（与宿主 `plugin/tests/pytest.ini` 同一约定）。
 
-四条门禁由测试自己把守，改的时候别绕开它们：`tests/test_config_keys.py` 要求代码里读到的每个配置键都在 `plugin.toml` 声明、且 `plugin.toml` 与 `config.example.toml` 键集一致；`tests/test_smoke.py` 要求中英 locale 键集完全相同、面板**可见**文案不超字数预算、`panel.tsx` 用到的每个 action id 真的是一条已声明入口、`plugin.toml` 与 `pyproject.toml` 版本号一致；`[plugin].version` 必须三段数字（`validate_cmd.py:181`，写成 `0.97` 直接 error）；宿主侧 `PLUGIN_EXECUTION_TIMEOUT = 30.0`、`PLUGIN_STARTUP_TIMEOUT = 10.0`（`plugin/settings.py:283,291`）决定了"入口 timeout ≤ 30、`total_timeout_seconds` 上限 28、**不要在 `startup()` 里做逐把网络探测**"。
+四条门禁由测试自己把守，改的时候别绕开它们：`tests/test_config_keys.py` 要求代码里读到的每个配置键都在 `plugin.toml` 声明、且 `plugin.toml` 与 `config.example.toml` 键集一致；`tests/test_smoke.py` 要求中英 locale 键集完全相同、面板**可见**文案不超字数预算、`panel.tsx` 用到的每个 action id 真的是一条已声明入口、`plugin.toml` 与 `pyproject.toml` 版本号一致；`[plugin].version` 必须三段数字（`validate_cmd.py:181`，写成 `0.97` 直接 error）；宿主侧 `PLUGIN_EXECUTION_TIMEOUT = 30.0`、`PLUGIN_STARTUP_TIMEOUT = 10.0`（`plugin/settings.py:283,292`）决定了"入口 timeout ≤ 30、`total_timeout_seconds` 上限 28、**不要在 `startup()` 里做逐把网络探测**"。
 
 > 别把这份 checkout 直接拷进 `N.E.K.O/plugin/plugins/`：宿主要求**模块段等于目录名**（`plugin/core/host.py:459-478`），而仓库名带着一个点（`n.e.k.o_plugin_better_web_search`）只是 Git 侧的约定。要么用打包产物，要么建一个无点的目录名。
 

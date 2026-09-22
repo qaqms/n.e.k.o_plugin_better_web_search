@@ -29,6 +29,8 @@ duckduckgo_method = "POST"
 anysearch_api_key = ""
 anysearch_zone = ""
 searxng_base_url = ""
+# 实时抓取：只在 exa_tool = "advanced" 时才生效（advanced 会自己爬页面）；
+# 默认的 auto 快路径不带这个参数，开了也没有区别。
 exa_live_crawl = false
 
 # Exa 密钥（可选升级，不是必需）：注册地址 https://dashboard.exa.ai/api-keys

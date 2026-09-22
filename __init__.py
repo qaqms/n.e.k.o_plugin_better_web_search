@@ -1018,7 +1018,9 @@ class BetterWebSearchPlugin(NekoPluginBase):
                 target, timeout=timeout, policy=pol, proxy_url=pxy, max_chars=budget)))
         if requested in {"auto", "reader"}:
             # Same pool as search: reading a page must not keep hammering the key
-            # that just answered 402 a second ago.
+            # that just answered 402 a second ago. Only the ring start moves here
+            # though -- `_search_once` is the sole writer on this path, so a reload
+            # after fetch-only can step back one key.
             routes.append(("exa", lambda timeout, pol, pxy: self._call_with_exa_keys(
                 lambda key: _providers.fetch_exa(
                     target, timeout=timeout, policy=pol, proxy_url=pxy,

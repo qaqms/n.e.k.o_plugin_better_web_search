@@ -113,7 +113,8 @@ anysearch_api_key = ""
 anysearch_zone = ""
 # 自建实例示例：http://127.0.0.1:8888 （远程实例必须 https）
 searxng_base_url = ""
-# 开启后 Exa 会实时抓取网页，更新但更慢
+# 开启后 Exa 会实时抓取网页，更新但更慢 —— 只在 exa_tool = "advanced" 时生效，
+# 默认的 auto 快路径不带这个参数（advanced 才会自己爬页面）
 exa_live_crawl = false
 
 # ---------------------------------------------------------------------------
