@@ -6,7 +6,7 @@ id = "better_web_search"
 # （install_plan.py:135-153 → 前端 package.install.blockedLegacyPlugin），避免出现
 # 两个都注册了 search 工具的插件抢活。请先卸载旧插件，再装这份。
 previous_ids = ["free_web_search"]
-version = "0.9.8"
+version = "1.0.0"
 type = "plugin"
 description = "不需要任何 API Key 的联网搜索与网页正文阅读。开箱即用，失败自动换后端；自带面板新手引导（可填入多把 Exa 免费密钥，一把用完自动换下一把）、宿主内置搜索状态查看（停用它请在插件中心点一下）、代理软件兼容开关、网络自检，面板还能回看最近一次搜索是哪一路答的；支持代理与自建 SearXNG。"
 short_description = "免 Key 联网搜索 + 网页正文，多后端自动回退；面板一键引导、自检与搜索回看。"
