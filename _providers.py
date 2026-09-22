@@ -513,7 +513,9 @@ def search_anysearch(query: str, limit: int, *, timeout: float, policy: str, pro
     # pi-lens-ignore: no-boolean-in-except
     except HttpStatusCodeError as error:
         if error.status in {401, 403} and key:
-            raise SearchProviderError("AnySearch API Key 无效或已失效") from error
+            # Its own type, not a generic provider failure: the panel must be able
+            # to say "this key is not valid" without also blaming the network.
+            raise ApiKeyRejectedError("AnySearch API Key 无效或已失效") from error
         if error.status == 429:
             raise BlockedError("AnySearch 请求受限（429）", error.retry_after_seconds) from error
         raise SearchProviderError(f"AnySearch 请求失败（HTTP {error.status}）") from error

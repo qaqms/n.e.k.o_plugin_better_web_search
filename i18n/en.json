@@ -40,6 +40,7 @@
   "panel.actions.saveKey": "Save and use",
   "panel.actions.addKey": "Add another key",
   "panel.actions.testAll": "Retest all",
+  "panel.actions.testOne": "Test this key",
   "panel.actions.clearAll": "Clear all",
   "panel.actions.removeOne": "Remove",
   "panel.actions.cancel": "Cancel",
@@ -72,6 +73,8 @@
   "panel.confirm.removeOk": "Yes",
   "panel.confirm.oneTitle": "Remove this key",
   "panel.confirm.oneMessage": "This only makes the plugin forget {masked}; your Exa account is untouched. Remove it?",
+  "panel.confirm.anyTitle": "Remove the anysearch key",
+  "panel.confirm.anyMessage": "This only makes the plugin forget this key; your AnySearch account is untouched, and searches still work without it (anonymous tier).",
 
   "panel.done.title": "Key management",
   "panel.key.label": "Key pool",
@@ -87,6 +90,14 @@
   "panel.key.invalid": "Check failed",
   "panel.key.unknown": "Not tested yet",
   "panel.key.notSaved": "No key saved (free tier)",
+
+  "panel.any.label": "anysearch key",
+  "panel.any.stateLabel": "anysearch state",
+  "panel.any.accTitle": "Optional: what this key is for",
+  "panel.any.help": "AnySearch issues free keys too; adding one only raises the limits, and leaving it empty still searches (the anonymous tier). It also decides order: with this key set, exa no longer moves up to the first slot.",
+  "panel.any.fieldLabel": "Paste the anysearch key",
+  "panel.any.fieldHelp": "It is stored only in this plugin's config; the panel, the logs and status reports all show any****last-4 at most.",
+  "panel.any.placeholder": "Copy it from the AnySearch console",
 
   "panel.tabs.status": "Status",
   "panel.tabs.setup": "Settings",

@@ -113,6 +113,7 @@ def make_plugin(search: dict | None = None, *, net_: dict | None = None,
     plugin._coordinators = {}
     plugin._key_state = "unknown"
     plugin._quota_state = ""
+    plugin._any_key_state = "unknown"
     plugin._exa_last_error = ""
     plugin._key_health = {}
     plugin._key_at = ""
@@ -137,8 +138,37 @@ def exa_results() -> list[dict]:
 
 def test_default_chain_matches_plan() -> None:
     plugin = make_plugin()
-    assert plugin._chain() == ["exa", "anysearch", "bing", "baidu"]
-    assert list(entries.DEFAULT_CHAIN) == ["exa", "anysearch", "bing", "baidu"]
+    assert plugin._chain() == ["anysearch", "exa", "bing", "baidu"]
+    assert list(entries.DEFAULT_CHAIN) == ["anysearch", "exa", "bing", "baidu"]
+
+
+def test_only_an_unpaired_exa_pool_takes_the_head() -> None:
+    """AnySearch leads unless the user registered Exa keys and has no AnySearch key."""
+    assert make_plugin()._ordered_chain() == ["anysearch", "exa", "bing", "baidu"]
+    assert make_plugin({"anysearch_api_key": "as-key"})._ordered_chain() == \
+        ["anysearch", "exa", "bing", "baidu"]
+    assert make_plugin({"exa_api_keys": [SECRET],
+                        "anysearch_api_key": "as-key"})._ordered_chain() == \
+        ["anysearch", "exa", "bing", "baidu"]
+    assert make_plugin({"exa_api_keys": [SECRET]})._ordered_chain() == \
+        ["exa", "anysearch", "bing", "baidu"]
+
+
+def test_explicit_backend_preference_outranks_the_key_rule() -> None:
+    """A hand-picked engine still leads even when an Exa pool would have promoted Exa."""
+    plugin = make_plugin({"exa_api_keys": [SECRET], "backend": "bing"})
+    assert plugin._ordered_chain() == ["bing", "anysearch", "exa", "baidu"]
+
+
+def test_keyed_exa_is_actually_tried_first(monkeypatch) -> None:
+    """The reported head and the engine the runtime knocks on must be the same one."""
+    monkeypatch.setattr(net, "system_proxy_present", lambda: False)
+    attempted: list[str] = []
+    plugin = make_plugin({"exa_api_keys": [SECRET]})
+    _stub_backends(plugin, monkeypatch, {"exa"}, attempted)
+    outcome = asyncio.run(plugin._search_with_fallback("猫娘计划", 3, "auto"))
+    assert attempted == ["exa", "anysearch"]
+    assert outcome["backend"] == "anysearch"
 
 
 def test_duckduckgo_trimmed_without_any_proxy(monkeypatch) -> None:
@@ -366,6 +396,8 @@ def test_mask_key_shapes() -> None:
     assert BetterWebSearchPlugin._mask_key("   ") == ""
     # A key this short must not be echoed even partially.
     assert BetterWebSearchPlugin._mask_key("abcd") == "exa****"
+    # The prefix is what tells the two backends' keys apart on the panel.
+    assert BetterWebSearchPlugin._mask_key(SECRET, "any") == f"any****{TAIL}"
 
 
 def _install_key_error(monkeypatch, error, anonymous_ok=True):
@@ -785,7 +817,8 @@ def test_fingerprint_is_a_short_stable_hash_not_the_key() -> None:
 
 CONTEXT_KEYS = {
     "onboarding_stage", "exa_keys", "exa_key_masked", "exa_key_source", "exa_key_state",
-    "exa_last_error", "chain", "effective_chain", "proxy_mode", "proxy_detected",
+    "exa_last_error", "anysearch_key_masked", "anysearch_key_state",
+    "chain", "effective_chain", "proxy_mode", "proxy_detected",
     "host_search", "ssrf_fake_ip", "key_fallback", "quota_note", "last_search",
 }
 
@@ -824,7 +857,7 @@ def test_panel_context_defaults_without_key(monkeypatch) -> None:
     context = plugin._build_panel_context({"exists": False, "running": False})
     assert context["exa_key_masked"] == ""
     assert context["exa_key_source"] == "none"
-    assert context["chain"] == ["exa", "anysearch", "bing", "baidu"]
+    assert context["chain"] == ["anysearch", "exa", "bing", "baidu"]
     assert context["last_search"] == {}
 
 
@@ -1128,6 +1161,128 @@ def test_clear_and_test_exa_key_without_key(monkeypatch) -> None:
 def test_save_exa_key_rejects_empty(monkeypatch) -> None:
     plugin = make_plugin()
     assert asyncio.run(plugin.save_exa_key(api_key="  ")).is_err()
+
+
+# ---------------------------------------------------------------------------
+# D2. the single optional AnySearch key: same contract, no ring
+# ---------------------------------------------------------------------------
+
+ANY_SECRET = "as-live-0123456789abcdef9b2c"
+ANY_TAIL = ANY_SECRET[-4:]
+
+
+def _install_any_error(monkeypatch, error) -> list[str]:
+    calls: list[str] = []
+
+    def fake(query, limit, *, timeout, policy, proxy_url, api_key="", zone=""):
+        calls.append(api_key)
+        if api_key:
+            raise error
+        return exa_results()
+
+    monkeypatch.setattr(providers, "search_anysearch", fake)
+    return calls
+
+
+def test_set_anysearch_key_saves_verifies_and_masks(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def good(query, limit, *, timeout, policy, proxy_url, api_key="", zone=""):
+        seen.append(api_key)
+        return exa_results()
+
+    monkeypatch.setattr(providers, "search_anysearch", good)
+    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    plugin = make_plugin(data=data)
+    payload = asyncio.run(plugin.set_anysearch_key(api_key=f"  {ANY_SECRET}  ")).value
+    assert payload["ok"] is True
+    assert seen == [ANY_SECRET]                              # trimmed before it is used
+    assert data["search"]["anysearch_api_key"] == ANY_SECRET  # written to disk
+    assert plugin._cfg["anysearch_api_key"] == ANY_SECRET     # and reloaded in-process
+    assert payload["masked"] == f"any****{ANY_TAIL}"
+    assert payload["key_state"] == "valid"
+    assert ANY_SECRET not in json.dumps(payload, ensure_ascii=False)
+    context = plugin._build_panel_context({})
+    assert context["anysearch_key_masked"] == f"any****{ANY_TAIL}"
+    assert context["anysearch_key_state"] == "valid"
+    assert ANY_SECRET not in json.dumps(context, ensure_ascii=False)
+    # The search itself must use what was just saved, not a second copy of nothing.
+    assert plugin._anysearch_key() == ANY_SECRET
+
+
+def test_set_anysearch_key_rejects_empty_and_keeps_the_old_one(monkeypatch) -> None:
+    plugin = make_plugin({"anysearch_api_key": ANY_SECRET})
+    monkeypatch.setattr(providers, "search_anysearch",
+                        lambda *a, **k: pytest.fail("an empty draft must not be tested"))
+    assert asyncio.run(plugin.set_anysearch_key(api_key="   ")).is_err()
+    assert plugin._anysearch_key() == ANY_SECRET
+
+
+def test_bad_anysearch_key_saves_but_marks_invalid(monkeypatch) -> None:
+    _install_any_error(monkeypatch, ApiKeyRejectedError("AnySearch API Key 无效或已失效"))
+    data = {"search": {}, "net": {}, "ui": {}, "host": {}}
+    plugin = make_plugin(data=data)
+    payload = asyncio.run(plugin.set_anysearch_key(api_key=ANY_SECRET)).value
+    assert payload["ok"] is False
+    assert payload["key_state"] == "invalid"
+    assert data["search"]["anysearch_api_key"] == ANY_SECRET   # saved anyway (contract)
+    assert ANY_SECRET not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_anysearch_rate_limit_never_blames_the_key(monkeypatch) -> None:
+    """429 says the window is busy; a wrong badge would have users re-paste a good key."""
+    _install_any_error(monkeypatch, resilience.BlockedError("AnySearch 请求受限（429）", 5))
+    plugin = make_plugin({"anysearch_api_key": ANY_SECRET})
+    plugin._any_key_state = "valid"
+    payload = asyncio.run(plugin.test_anysearch_key()).value
+    assert payload["ok"] is False
+    assert plugin._any_key_state == "valid"
+    assert "限流" in payload["message"]
+    assert ANY_SECRET not in json.dumps(payload, ensure_ascii=False)
+
+
+def test_anysearch_network_failure_leaves_the_verdict_alone(monkeypatch) -> None:
+    _install_any_error(monkeypatch, net.NetworkError("网络不可达: timed out"))
+    plugin = make_plugin({"anysearch_api_key": ANY_SECRET})
+    payload = asyncio.run(plugin.test_anysearch_key()).value
+    assert payload["ok"] is False
+    assert plugin._any_key_state == "unknown"                  # never adjudicated
+    assert "网络" in payload["message"] or "测试未完成" in payload["message"]
+
+
+def test_anysearch_search_sends_the_saved_key(monkeypatch) -> None:
+    seen: list[str] = []
+
+    def good(query, limit, *, timeout, policy, proxy_url, api_key="", zone=""):
+        seen.append(api_key)
+        return exa_results()
+
+    monkeypatch.setattr(providers, "search_anysearch", good)
+    plugin = make_plugin({"anysearch_api_key": ANY_SECRET, "anysearch_zone": "cn"})
+    results = plugin._fetcher("anysearch", "q", 3, 5.0)()
+    assert results == exa_results()
+    assert seen == [ANY_SECRET]
+
+
+def test_clear_anysearch_key_returns_to_the_anonymous_tier(monkeypatch) -> None:
+    data = {"search": {"anysearch_api_key": ANY_SECRET}, "net": {}, "ui": {}, "host": {}}
+    plugin = make_plugin(data=data)
+    plugin._any_key_state = "valid"
+    result = asyncio.run(plugin.clear_anysearch_key())
+    assert result.is_ok()
+    assert data["search"]["anysearch_api_key"] == ""
+    assert plugin._cfg["anysearch_api_key"] == ""
+    assert plugin._any_key_state == "unknown"
+    assert plugin._build_panel_context({})["anysearch_key_state"] == "none"
+
+
+def test_test_anysearch_key_without_a_key_says_so(monkeypatch) -> None:
+    monkeypatch.setattr(providers, "search_anysearch",
+                        lambda *a, **k: pytest.fail("must not search without a key"))
+    payload = asyncio.run(make_plugin().test_anysearch_key()).value
+    assert payload["ok"] is False
+    assert payload["key_state"] == "none"
+    assert payload["masked"] == ""
 
 
 def test_adding_a_key_that_is_already_there_does_not_double_it(monkeypatch) -> None:

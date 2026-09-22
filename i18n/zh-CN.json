@@ -40,6 +40,7 @@
   "panel.actions.saveKey": "保存并使用",
   "panel.actions.addKey": "再加一把",
   "panel.actions.testAll": "重测全部",
+  "panel.actions.testOne": "测这把",
   "panel.actions.clearAll": "清空全部",
   "panel.actions.removeOne": "移除",
   "panel.actions.cancel": "取消",
@@ -72,6 +73,8 @@
   "panel.confirm.removeOk": "确定",
   "panel.confirm.oneTitle": "移除这把密钥",
   "panel.confirm.oneMessage": "只从插件里忘掉 {masked}，不会动 Exa 账号本身。要移除吗？",
+  "panel.confirm.anyTitle": "移除 anysearch 密钥",
+  "panel.confirm.anyMessage": "只从插件配置里忘掉这把，不影响你的 AnySearch 账号；移除后照样能搜（走匿名档）。",
 
   "panel.done.title": "密钥管理",
   "panel.key.label": "密钥池",
@@ -87,6 +90,14 @@
   "panel.key.invalid": "没验通过",
   "panel.key.unknown": "还没测",
   "panel.key.notSaved": "没存密钥（用免费额度）",
+
+  "panel.any.label": "anysearch 密钥",
+  "panel.any.stateLabel": "anysearch 状态",
+  "panel.any.accTitle": "选填：这把密钥管什么",
+  "panel.any.help": "AnySearch 也发免费密钥，填了只是限额更高，留空照样能搜（走匿名档）。它还管一件事：填了这把，exa 就不再自动升到链路首位。",
+  "panel.any.fieldLabel": "粘贴 anysearch 密钥",
+  "panel.any.fieldHelp": "只存在本插件配置里；面板、日志、状态上报一律只显示 any****尾4位。",
+  "panel.any.placeholder": "从 AnySearch 控制台复制",
 
   "panel.tabs.status": "状态",
   "panel.tabs.setup": "设置",

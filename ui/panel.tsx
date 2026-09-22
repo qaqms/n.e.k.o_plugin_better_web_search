@@ -66,6 +66,8 @@ type PanelState = {
   exa_key_source?: string
   exa_key_state?: string
   exa_last_error?: string
+  anysearch_key_masked?: string
+  anysearch_key_state?: string
   key_fallback?: boolean
   chain?: string[]
   effective_chain?: string[]
@@ -210,6 +212,8 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   const [keyDraft, setKeyDraft] = useState("")
   const [replaceOpen, setReplaceOpen] = useState(false)
   const [keyError, setKeyError] = useState("")
+  const [anyDraft, setAnyDraft] = useState("")
+  const [anyError, setAnyError] = useState("")
   const [notice, setNotice] = useState("")
   const [noticeIsError, setNoticeIsError] = useState(false)
   const [diagnose, setDiagnose] = useState<DiagnoseView | null>(null)
@@ -222,6 +226,8 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   const keyState = asString(safeState.exa_key_state, "unknown").toLowerCase()
   const keyCards: ExaKeyCard[] = Array.isArray(safeState.exa_keys) ? safeState.exa_keys : []
   const usableKeys = keyCards.filter((card) => card.state !== "invalid" && card.state !== "exhausted").length
+  const anyMasked = asString(safeState.anysearch_key_masked, "")
+  const anyKeyState = asString(safeState.anysearch_key_state, "none").toLowerCase()
   const keyFallbackKnown = typeof safeState.key_fallback === "boolean"
   const keyFallback = asBool(safeState.key_fallback, false)
   const lastError = asString(safeState.exa_last_error, "")
@@ -559,12 +565,76 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     )
   }
 
+  function anyKeyBadge() {
+    if (anyKeyState === "none" || !anyMasked) {
+      return <StatusBadge tone="warning" label={t("panel.key.notSaved")} />
+    }
+    if (anyKeyState === "valid") return <StatusBadge tone="success" label={t("panel.key.valid")} />
+    if (anyKeyState === "invalid") return <StatusBadge tone="danger" label={t("panel.key.invalid")} />
+    return <StatusBadge tone="info" label={t("panel.key.unknown")} />
+  }
+
   function keyCardBadge(card: ExaKeyCard) {
     const state = asString(card.state, "unknown").toLowerCase()
     if (state === "invalid") return <StatusBadge tone="danger" label={t("panel.key.invalid")} />
     if (state === "exhausted") return <StatusBadge tone="warning" label={t("panel.key.spent")} />
     if (state === "ok") return <StatusBadge tone="success" label={t("panel.key.valid")} />
     return <StatusBadge tone="info" label={t("panel.key.unknown")} />
+  }
+
+  // The AnySearch key is a single value, so its three actions never touch a ring:
+  // the backend answers with the fixed copy shown here (the key itself never does).
+  async function saveAnyKey(): Promise<void> {
+    const value = anyDraft.trim()
+    if (!value) {
+      setAnyError(t("panel.guide.keyEmpty"))
+      return
+    }
+    setAnyError("")
+    const result = await runAction("set_anysearch_key", { api_key: value }, "anysave", 60000)
+    if (!result) return
+    const ok = resultOk(result)
+    const message = resultMessage(result) || (ok ? t("panel.messages.fallbackSaved") : t("panel.messages.fallbackFailed"))
+    setAnyDraft("")
+    showNotice(message, !ok)
+    if (ok) toast.success(message)
+    else toast.error(message)
+    await refreshContext()
+  }
+
+  async function testAnyKey(): Promise<void> {
+    const result = await runAction("test_anysearch_key", {}, "anytest", 60000)
+    if (!result) return
+    const ok = resultOk(result)
+    const parts: string[] = [resultMessage(result) || (ok ? t("panel.messages.testOk") : t("panel.messages.testFailed"))]
+    const latency = latencyText(result.latency_ms)
+    if (latency) parts.push(t("panel.messages.testLatency", { latency }))
+    const count = Number(result.count)
+    if (Number.isFinite(count) && count > 0) parts.push(t("panel.messages.testCount", { count }))
+    showNotice(parts.join(" · "), !ok)
+    if (ok) toast.success(parts.join(" · "))
+    else toast.error(parts.join(" · "))
+    await refreshContext()
+  }
+
+  async function clearAnyKey(): Promise<void> {
+    const accepted = await confirm({
+      title: t("panel.confirm.anyTitle"),
+      message: t("panel.confirm.anyMessage"),
+      tone: "danger",
+      confirmLabel: t("panel.confirm.removeOk"),
+      cancelLabel: t("panel.actions.cancel"),
+    })
+    if (!accepted) return
+    const result = await runAction("clear_anysearch_key", {}, "anyclear")
+    if (!result) return
+    const ok = resultOk(result)
+    const message = resultMessage(result) || (ok ? t("panel.messages.keyRemoved") : t("panel.messages.keyRemoveFailed"))
+    showNotice(message, !ok)
+    if (ok) toast.success(message)
+    else toast.error(message)
+    setAnyDraft("")
+    await refreshContext()
   }
 
   async function toggleKeyFallback(value: boolean): Promise<void> {
@@ -614,6 +684,51 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
             disabled={busy("fallback") || !keyFallbackKnown || !canCall("set_key_fallback")}
             onChange={(value) => toggleKeyFallback(value)}
           />
+          <Grid cols={2}>
+            <StatCard label={t("panel.any.label")} value={maskOrDash(anyMasked)} />
+            <StatCard label={t("panel.any.stateLabel")} value={anyKeyBadge()} />
+          </Grid>
+          <Accordion id="any-key" title={t("panel.any.accTitle")} open={false}>
+            <Text>{t("panel.any.help")}</Text>
+            <Field
+              label={t("panel.any.fieldLabel")}
+              help={t("panel.any.fieldHelp")}
+              error={anyError}
+              required
+            >
+              <PasswordInput
+                value={anyDraft}
+                placeholder={t("panel.any.placeholder")}
+                disabled={pending === "anysave"}
+                onChange={(value) => setAnyDraft(value)}
+              />
+            </Field>
+            <Inline gap={3} wrap>
+              <Button
+                tone="success"
+                disabled={busy("anysave") || !canCall("set_anysearch_key")}
+                onClick={saveAnyKey}
+              >
+                {label("anysave", "panel.actions.saveKey")}
+              </Button>
+              <Button
+                tone="info"
+                disabled={busy("anytest") || !canCall("test_anysearch_key")}
+                onClick={testAnyKey}
+              >
+                {label("anytest", "panel.actions.testOne")}
+              </Button>
+              {anyMasked ? (
+                <Button
+                  tone="danger"
+                  disabled={busy("anyclear") || !canCall("clear_anysearch_key")}
+                  onClick={clearAnyKey}
+                >
+                  {label("anyclear", "panel.actions.removeOne")}
+                </Button>
+              ) : null}
+            </Inline>
+          </Accordion>
           <Accordion id="keys-help" title={t("panel.keys.helpTitle")} open={false}>
             <Text>{t("panel.keys.help")}</Text>
             <Text>{t("panel.key.fallbackHelp")}</Text>
