@@ -123,11 +123,9 @@ _MSG_EXA_UNREACHABLE = "Exa 这次连不上（超时或网络不可达）：本�
 _MSG_NO_HOST = "未能读取宿主插件状态，请到插件中心确认『网络搜索』是否在运行"
 _QUOTA_NOTE = "每个账号每月刷新 $10 ≈ 1400 次；多填几把会自动轮流用，不填也能搜，只是匿名档慢且限额低"
 _ONBOARDING_HINT = (
-    "主人，『更好的网络搜索』已经装好啦。请打开插件中心里的『联网搜索』面板："
-    "点【先体验】就能立刻免密钥搜索；想更快更稳，可以照面板里的教程注册一个 "
-    "Exa 免费密钥（邮箱注册，每个账号每月 $10 额度）粘贴进去并一键测试——"
-    "一个账号不够用就多注册几个、把密钥都加进密钥池，一把用完会自动换下一把。"
-    "面板里还能一键停用系统自带的『网络搜索』，避免两个搜索插件互相抢活。"
+    "主人，『更好的网络搜索』装好啦。请到宿主「插件中心」把自带的『网络搜索』停用，"
+    "对话里的联网搜索就交给本插件——这一步要你亲手点，插件不替你按宿主的开关。"
+    "不填任何密钥也能直接搜；想搜得更多更稳，再去面板「进阶」里填 Exa 或 AnySearch 的免费密钥。"
 )
 
 
@@ -447,7 +445,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "anysearch_api_key_configured": bool(self._text("anysearch_api_key")),
             "exa_key_count": len(self._exa_keys()),
             "exa_key_state": self._key_state,
-            "onboarding_stage": self._text_in("ui", "onboarding_stage"),
         }
         self._safe_report_status(payload)
         return Ok(payload)
@@ -482,8 +479,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
         ``config_change``, and even if a reload happens we never re-push.
         """
         try:
-            if self._text_in("ui", "onboarding_stage"):
-                return
             if self._flag_in("ui", "first_run_notice_sent", False):
                 return
             try:
@@ -1122,7 +1117,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
         cards = self._exa_key_cards()
         any_key = self._anysearch_key()
         return {
-            "onboarding_stage": self._text_in("ui", "onboarding_stage"),
             "exa_keys": cards,
             "exa_key_masked": str(cards[0]["masked"]) if cards else "",
             "exa_key_source": "config" if cards else "none",
@@ -1195,20 +1189,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
         # bare error blob: the panel shows a stale-but-real state plus its own hint.
         stored = getattr(self, "_host_state_cache", None)
         return self._build_panel_context(stored[1] if stored else host_search)
-
-    async def _finish_onboarding_if_verified(self, kind: str) -> None:
-        """A verified key ends the guide -- persist that, don't just paint it.
-
-        The panel used to fake it with an optimistic local stage that its own
-        refresh cleared again, and nothing ever wrote ``[ui].onboarding_stage``,
-        so every reopen landed back on the guide (or the "you are on the free
-        tier" card) even with a working key in the config.
-        """
-        if kind != "":
-            return
-        if self._text_in("ui", "onboarding_stage") == "done":
-            return
-        await self._persist({"ui": {"onboarding_stage": "done"}})
 
     async def _verify_exa_key(self, key: str) -> tuple[bool, int, int, str, str]:
         """One real search with ``key``. Returns (ok, ms, count, 中文文案, kind).
@@ -1359,7 +1339,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             await self._save_key_ring()
         else:
             message = "密钥没能保存：宿主没有确认这次配置写入，请再点一次添加（不填密钥也能搜索）"
-        await self._finish_onboarding_if_verified(kind if saved else "network")
         return Ok({
             "ok": bool(ok and saved),
             "masked": self._mask_key(text),
@@ -1457,7 +1436,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
         tested = len([row for row in rows if row.get("kind") != "skipped"])
         ms_sum = int((time.perf_counter() - started) * 1000)
         await self._save_key_ring()
-        await self._finish_onboarding_if_verified("" if usable else "key")
         return Ok({
             "ok": usable > 0,
             "key_count": len(pool),
@@ -1561,42 +1539,6 @@ class BetterWebSearchPlugin(NekoPluginBase):
             "message": error or ("内置『网络搜索』正在运行" if running
                                  else "内置『网络搜索』未在运行"),
         })
-
-    @ui.action(label="记录引导进度", icon="🧭", group="onboarding", order=10, refresh_context=False)
-    @plugin_entry(
-        id="set_onboarding",
-        name="更新引导阶段",
-        description="仅供面板调用：把新手引导的进度写进 [ui].onboarding_stage。",
-        timeout=10.0,
-        input_schema={
-            "type": "object",
-            "properties": {
-                "stage": {"type": "string", "enum": ["done", "trial"],
-                          "description": "done=已完成引导；trial=选择先体验"},
-            },
-            "required": ["stage"],
-        },
-    )
-    async def set_onboarding(self, stage: str = "", **_):
-        value = str(stage or "").strip().lower()
-        if value not in {"welcome", "done", "trial"}:
-            return Err(SdkError("stage 只能是 done 或 trial"))
-        if not await self._persist({"ui": {"onboarding_stage": value}}):
-            return Err(SdkError("写入失败：配置未能保存，请重试"))
-        return Ok({"ok": True, "stage": value})
-
-    @ui.action(label="重新打开引导", icon="✨", group="onboarding", order=20, refresh_context=True)
-    @plugin_entry(
-        id="show_guide",
-        name="重新呼起引导",
-        description="仅供面板调用：把引导阶段重置回 welcome，让面板重新显示三步引导。",
-        timeout=10.0,
-        input_schema={"type": "object", "properties": {}},
-    )
-    async def show_guide(self, **_):
-        if not await self._persist({"ui": {"onboarding_stage": "welcome"}}):
-            return Err(SdkError("写入失败：配置未能保存，请重试"))
-        return Ok({"ok": True, "stage": "welcome", "message": "已重新打开引导"})
 
     @ui.action(label="开关代理软件兼容", icon="🛡", group="tools", order=20, refresh_context=True)
     @plugin_entry(

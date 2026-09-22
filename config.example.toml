@@ -88,7 +88,5 @@ diagnose_query = "N.E.K.O 猫娘 插件"
 ssrf_allow_ranges = ["198.18.0.0/15"]
 
 [ui]
-# 面板引导进度，由面板维护：""|welcome|trial|done
-onboarding_stage = ""
 # 首启引导提示只发一次（猫娘会在第一次启动时开口引导）
 first_run_notice_sent = false

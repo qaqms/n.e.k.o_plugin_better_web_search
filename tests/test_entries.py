@@ -845,7 +845,7 @@ def test_fingerprint_is_a_short_stable_hash_not_the_key() -> None:
 # ---------------------------------------------------------------------------
 
 CONTEXT_KEYS = {
-    "onboarding_stage", "exa_keys", "exa_key_masked", "exa_key_source", "exa_key_state",
+    "exa_keys", "exa_key_masked", "exa_key_source", "exa_key_state",
     "exa_last_error", "anysearch_key_masked", "anysearch_key_state",
     "chain", "effective_chain", "proxy_mode", "proxy_detected",
     "host_search", "ssrf_fake_ip", "key_fallback", "quota_note", "last_search",
@@ -858,11 +858,9 @@ def test_panel_context_shape_and_mask(monkeypatch) -> None:
     monkeypatch.setattr(net, "system_proxy_present", lambda: False)
     plugin = make_plugin(
         {"exa_api_keys": [SECRET], "backend_chain": ["exa", "duckduckgo", "anysearch", "bing"]},
-        ui_={"onboarding_stage": "trial"},
     )
     context = plugin._build_panel_context({"exists": True, "running": True})
     assert set(context) == CONTEXT_KEYS
-    assert context["onboarding_stage"] == "trial"
     assert context["exa_key_masked"] == f"exa****{TAIL}"
     assert context["exa_key_source"] == "config"
     # Nothing has been tried yet, so the honest answer is "unknown", not "valid".
@@ -1095,44 +1093,6 @@ def test_save_exa_key_still_says_no_when_the_write_really_failed(monkeypatch) ->
     assert outcome.is_ok()                        # the search itself still works
     assert outcome.value["ok"] is False           # but the key is not stored
     assert "没能保存" in outcome.value["message"]
-
-
-def _stage_plugin(stage: str) -> BetterWebSearchPlugin:
-    return make_plugin({"backend_chain": ["exa"], "exa_api_keys": [SECRET]},
-                       ui_={"onboarding_stage": stage})
-
-
-def _verify_stub(monkeypatch, kind: str) -> None:
-    async def fake_verify(self, key: str):      # patched on the class: takes self
-        if kind == "":
-            return True, 120, 3, "密钥可用", ""
-        return False, 120, 0, "密钥无效", kind
-    monkeypatch.setattr(entries.BetterWebSearchPlugin, "_verify_exa_key", fake_verify)
-
-
-def test_verified_key_finishes_the_guide_persistently(monkeypatch) -> None:
-    """The stage must be written, not just painted: the panel's optimistic local
-    stage was cleared by its own refresh, so the guide came back every open."""
-    _verify_stub(monkeypatch, "")
-    plugin = _stage_plugin("trial")
-    asyncio.run(plugin.save_exa_key(api_key=SECRET))
-    assert plugin.config.data["ui"]["onboarding_stage"] == "done"
-    assert plugin._text_in("ui", "onboarding_stage") == "done"
-
-
-def test_rejected_key_leaves_the_guide_where_it_was(monkeypatch) -> None:
-    _verify_stub(monkeypatch, "key")
-    plugin = _stage_plugin("trial")
-    asyncio.run(plugin.save_exa_key(api_key=SECRET))
-    assert plugin.config.data["ui"]["onboarding_stage"] == "trial"
-
-
-def test_testing_a_saved_key_also_finishes_the_guide(monkeypatch) -> None:
-    _verify_stub(monkeypatch, "")
-    plugin = _stage_plugin("")
-    outcome = asyncio.run(plugin.test_exa_key())
-    assert outcome.is_ok() and outcome.value["ok"] is True
-    assert plugin.config.data["ui"]["onboarding_stage"] == "done"
 
 
 def test_save_exa_key_persists_reloads_and_reports_masked(monkeypatch) -> None:
@@ -1479,21 +1439,8 @@ def test_search_logs_which_backend_answered(monkeypatch) -> None:
 
 
 # ---------------------------------------------------------------------------
-# G. onboarding state flow
+# G. first-run notice
 # ---------------------------------------------------------------------------
-
-def test_set_onboarding_and_show_guide_flow() -> None:
-    data = {"search": {}, "net": {}, "ui": {}}
-    plugin = make_plugin(data=data)
-    done = asyncio.run(plugin.set_onboarding(stage="done"))
-    assert done.is_ok() and done.value["stage"] == "done"
-    assert data["ui"]["onboarding_stage"] == "done"
-    assert plugin._text_in("ui", "onboarding_stage") == "done"   # reloaded, no stale view
-    guide = asyncio.run(plugin.show_guide())
-    assert guide.is_ok() and guide.value["stage"] == "welcome"
-    assert data["ui"]["onboarding_stage"] == "welcome"
-    assert asyncio.run(plugin.set_onboarding(stage="nonsense")).is_err()
-
 
 def test_first_run_notice_pushes_once_and_marks_sent() -> None:
     data = {"search": {}, "net": {}, "ui": {}}
@@ -1515,20 +1462,15 @@ def test_first_run_notice_pushes_once_and_marks_sent() -> None:
     assert set(second.value) >= {"chain", "effective_chain"}
 
 
-def test_first_run_notice_skipped_when_stage_or_host_says_no() -> None:
-    data = {"search": {}, "net": {}, "ui": {"onboarding_stage": "trial"}}
-    plugin = make_plugin(data=data)
-    plugin.push_message = lambda **kw: pytest.fail("must not push once a stage exists")
-    assert asyncio.run(plugin.startup()).is_ok()
-
+def test_first_run_notice_survives_a_failing_push() -> None:
     def boom(**_kw):
         raise RuntimeError("bus down")
 
-    plugin2 = make_plugin(data={"search": {}, "net": {}, "ui": {}})
-    plugin2.push_message = boom
-    result = asyncio.run(plugin2.startup())
+    plugin = make_plugin(data={"search": {}, "net": {}, "ui": {}})
+    plugin.push_message = boom
+    result = asyncio.run(plugin.startup())
     assert result.is_ok()                             # push failure must not sink startup
-    assert plugin2._sections["ui"].get("first_run_notice_sent") is not True  # retry next boot
+    assert plugin._sections["ui"].get("first_run_notice_sent") is not True  # retry next boot
 
 
 # ---------------------------------------------------------------------------
@@ -1543,7 +1485,7 @@ def test_missing_sections_fall_back_to_defaults() -> None:
     plugin._coordinators = {}
     # Host may hand us anything; the getters must not raise on absent keys.
     assert plugin._flag_in("net", "nope", True) is True
-    assert plugin._text_in("ui", "onboarding_stage") == ""
+    assert plugin._text_in("ui", "no_such_key") == ""
     assert plugin._list_in("net", "ssrf_allow_ranges", entries.DEFAULT_SSRF_ALLOW_RANGES) == ["198.18.0.0/15"]
     assert plugin._ssrf_ranges() == ["198.18.0.0/15"]
     plugin._sections["net"] = {"ssrf_allow_ranges": []}

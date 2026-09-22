@@ -2,8 +2,9 @@
 //
 // 只依赖 @neko/plugin-ui 的导出；不产生任何网络请求（注册网址只是纯文本，供用户复制）。
 // 密钥只显示后端返回的掩码，输入框内容在保存后立刻清空，面板不留明文。
-// 版式约定：Tabs 分三区（状态/设置/诊断），解释性长句一律进默认收起的 Accordion，
-// 首屏只留徽章、数字和主操作 —— kit 里的 Tip 是带色边框的提示盒，多放就满屏高亮。
+// 版式约定：首屏是"还差一步"检查页（宿主内置还在跑就出现，停了就不再弹）；进入后
+// Tabs 分三区（状态/进阶/诊断），解释与注册教程一律进 Accordion，两家密钥各自成卡。
+// 首屏与卡片首屏只留徽章、数字和主操作 —— kit 里的 Tip 是带色边框的提示盒，多放就满屏高亮。
 import {
   Accordion,
   Alert,
@@ -33,6 +34,7 @@ import {
 import type { HostedAction, PluginSurfaceProps } from "@neko/plugin-ui"
 
 const EXA_KEY_PAGE = "https://dashboard.exa.ai/api-keys"
+const ANYSEARCH_KEY_PAGE = "https://www.anysearch.com/about"
 
 type HostSearchState = {
   exists?: boolean
@@ -60,7 +62,6 @@ type ExaKeyCard = {
 }
 
 type PanelState = {
-  onboarding_stage?: string
   exa_keys?: ExaKeyCard[]
   exa_key_masked?: string
   exa_key_source?: string
@@ -144,13 +145,6 @@ function resultOk(result: ActionRecord): boolean {
 }
 
 // 未知/空值一律回到引导首屏，符合「打开面板第一屏就是新手引导」。
-function stageOf(value: unknown): string {
-  const raw = asString(value, "").toLowerCase()
-  if (raw === "trial") return "trial"
-  if (raw === "done") return "done"
-  return "welcome"
-}
-
 function maskOrDash(masked: string): string {
   return masked || "-"
 }
@@ -208,7 +202,6 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   const actionRegistryLoaded = actionList.length > 0
 
   const [pending, setPending] = useState("")
-  const [localStage, setLocalStage] = useState("")
   const [keyDraft, setKeyDraft] = useState("")
   const [replaceOpen, setReplaceOpen] = useState(false)
   const [keyError, setKeyError] = useState("")
@@ -220,8 +213,9 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   // "" = follow whatever the host reports as the proxy situation; otherwise the
   // user forced dual-path on/off and we must not silently override that.
   const [dualPathDraft, setDualPathDraft] = useState("")
+  // 只记本次会话：内置还在跑就每次打开都回到检查页，但想先配密钥的人不该被锁在外面。
+  const [entered, setEntered] = useState(false)
 
-  const stage = localStage || stageOf(safeState.onboarding_stage)
   const maskedKey = asString(safeState.exa_key_masked, "")
   const keyState = asString(safeState.exa_key_state, "unknown").toLowerCase()
   const keyCards: ExaKeyCard[] = Array.isArray(safeState.exa_keys) ? safeState.exa_keys : []
@@ -240,6 +234,11 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   const hostKnown = typeof hostSearch.exists === "boolean" || typeof hostSearch.running === "boolean"
   const hostExists = asBool(hostSearch.exists, true)
   const hostRunning = asBool(hostSearch.running, false)
+  // 「读不到」不等于「没关」：宿主管理接口不应答时不许骚扰用户。
+  const showStart = hostKnown && hostRunning && !entered
+  // 教程序列在做完之后就自己收起。
+  const exaConfigured = keyCards.length > 0 || maskedKey !== ""
+  const anyConfigured = anyMasked !== ""
   const ssrfFakeIpKnown = typeof safeState.ssrf_fake_ip === "boolean"
   const ssrfFakeIp = asBool(safeState.ssrf_fake_ip, false)
   const proxyMode = asString(safeState.proxy_mode, "-")
@@ -295,27 +294,25 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     }
   }
 
-  // 状态以面板 context 为准；乐观值只在下一次刷新前短暂生效。
-  async function refreshContext(optimisticStage?: string): Promise<void> {
-    if (optimisticStage) setLocalStage(optimisticStage)
+  // 状态一律以面板 context 为准：不做乐观值，免得刷新前显示的是猜出来的进度。
+  async function refreshContext(): Promise<void> {
     try {
       await props.api.refresh()
     } catch (error) {
       const detail = error instanceof Error ? error.message : String(error)
       toast.error(t("panel.errors.refreshFailed", { detail }))
     }
-    setLocalStage("")
   }
 
-  async function copyRegisterUrl(): Promise<void> {
+  async function copyRegisterUrl(url: string): Promise<void> {
     // Order matters: try the copies that can fail *silently* first. The host
     // clipboard hook reports every internal rejection to the panel frame
     // ("插件界面控件错误"), so it may only be the last resort -- by then a failure
     // is real and the banner is informative rather than alarming.
     // See crbug.com/414348233 for why the async API is blocked in this document.
-    let copied = await nativeCopy(EXA_KEY_PAGE)
-    if (!copied) copied = legacyCopy(EXA_KEY_PAGE)
-    if (!copied) copied = await clipboard.write(EXA_KEY_PAGE)
+    let copied = await nativeCopy(url)
+    if (!copied) copied = legacyCopy(url)
+    if (!copied) copied = await clipboard.write(url)
     if (copied) toast.success(t("panel.guide.urlCopied"))
     else toast.error(t("panel.guide.copyFailed"))
   }
@@ -336,23 +333,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     showNotice(message, !ok)
     if (ok) toast.success(message)
     else toast.error(message)
-    await refreshContext("done")
-  }
-
-  async function startTrial(): Promise<void> {
-    const result = await runAction("set_onboarding", { stage: "trial" }, "trial")
-    if (!result) return
-    const ok = resultOk(result)
-    if (ok) toast.info(t("panel.messages.trialStarted"))
-    await refreshContext("trial")
-  }
-
-  async function openGuide(): Promise<void> {
-    const result = await runAction("show_guide", {}, "guide")
-    if (!result) return
-    setReplaceOpen(false)
-    setKeyDraft("")
-    await refreshContext("welcome")
+    await refreshContext()
   }
 
   async function testKey(): Promise<void> {
@@ -388,7 +369,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     else toast.error(message)
     setKeyDraft("")
     setReplaceOpen(false)
-    await refreshContext(ok ? "trial" : "")
+    await refreshContext()
   }
 
   async function removeOneKey(card: ExaKeyCard): Promise<void> {
@@ -508,57 +489,42 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     return <StatusBadge tone="info" label={t("panel.key.unknown")} />
   }
 
-  function renderGuide() {
+  function renderStartPage() {
+    // Gated on one objective fact: the host's built-in search is still running.
+    // A check that comes back unreadable must NOT be read as "not stopped yet" --
+    // that is how this plugin used to report landed changes as failures.
     return (
-      <Card title={t("panel.guide.title")}>
+      <Card title={t("panel.start.title")}>
         <Stack>
-          <Alert tone="info">{t("panel.guide.intro")}</Alert>
-          <Text>{t("panel.guide.freeNote")}</Text>
-          <Steps>
-            <Step index="1" title={t("panel.guide.step1.title")}>
-              <Stack>
-                <Text>{t("panel.guide.step1.line1")}</Text>
-                <CodeBlock>{EXA_KEY_PAGE}</CodeBlock>
-                <Inline gap={2} wrap>
-                  <Button tone="default" onClick={copyRegisterUrl}>
-                    {t("panel.guide.copyUrl")}
-                  </Button>
-                  <Text>{t("panel.guide.step1.line1b")}</Text>
-                </Inline>
-                <Text>{t("panel.guide.step1.line2")}</Text>
-                <Text>{t("panel.guide.step1.line3")}</Text>
-                <Accordion id="guide-step1-questions" title={t("panel.guide.step1.qAcc")} open={false}>
-                  <Text>{t("panel.guide.step1.qIntro")}</Text>
-                  <Text>{t("panel.guide.step1.q1")}</Text>
-                  <Text>{t("panel.guide.step1.q2")}</Text>
-                  <Text>{t("panel.guide.step1.q3")}</Text>
-                  <Text>{t("panel.guide.step1.qAfter")}</Text>
-                </Accordion>
-              </Stack>
-            </Step>
-            <Step index="2" title={t("panel.guide.step2.title")}>
-              <Stack>
-                <Text>{t("panel.guide.step2.line1")}</Text>
-                {renderKeyField("panel.guide.keyField.placeholderGuide")}
-              </Stack>
-            </Step>
-            <Step index="3" title={t("panel.guide.step3.title")}>
-              <Text>{t("panel.guide.step3.line1")}</Text>
-            </Step>
-          </Steps>
+          <Alert tone="warning">{t("panel.start.lead")}</Alert>
+          <Grid cols={2}>
+            <StatCard
+              label={t("panel.host.label")}
+              value={<StatusBadge tone="warning" label={t("panel.host.stateRunning")} />}
+            />
+            <StatCard
+              label={t("panel.start.selfLabel")}
+              value={<StatusBadge tone="success" label={t("panel.start.selfValue")} />}
+            />
+          </Grid>
+          <Text>{t("panel.start.whoClicks")}</Text>
+          <Text>{t("panel.start.twoPaths")}</Text>
           {renderNotice()}
-          {lastError ? <Alert tone="warning">{lastError}</Alert> : null}
-          <Inline gap={3} wrap justify="space-between">
-            <Button tone="default" disabled={busy("trial")} onClick={startTrial}>
-              {label("trial", "panel.actions.tryFree")}
+          <Inline gap={3} wrap>
+            <Button tone="primary" disabled={busy("hostcheck") || !canCall("get_host_search")} onClick={checkHostSearch}>
+              {label("hostcheck", "panel.actions.recheck")}
             </Button>
-            <Button tone="success" disabled={busy("save") || !canCall("save_exa_key")} onClick={saveKey}>
-              {label("save", "panel.actions.saveKey")}
+            <Button tone="default" onClick={() => { setEntered(true) }}>
+              {t("panel.start.enter")}
             </Button>
           </Inline>
-          <Accordion id="guide-quota" title={t("panel.guide.quotaAcc")} open={false}>
-            <Text>{quotaNote}</Text>
-            <Text>{t("panel.guide.quota")}</Text>
+          <Accordion id="start-where" title={t("panel.start.accWhere")} open={false}>
+            <Text>{t("panel.start.where")}</Text>
+            <Text>{t("panel.start.reopen")}</Text>
+          </Accordion>
+          <Accordion id="start-why" title={t("panel.host.accWhy")} open={false}>
+            <Text>{t("panel.host.why")}</Text>
+            <Text>{t("panel.host.gate")}</Text>
           </Accordion>
         </Stack>
       </Card>
@@ -648,9 +614,9 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
     await refreshContext()
   }
 
-  function renderKeyCard() {
+  function renderExaCard() {
     return (
-      <Card title={t("panel.done.title")}>
+      <Card title={t("panel.exa.title")}>
         <Stack>
           <Grid cols={2}>
             <StatCard
@@ -661,7 +627,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
             />
             <StatCard label={t("panel.key.stateLabel")} value={keyBadge()} />
           </Grid>
-          {!keyCards.length ? <Text>{t("panel.trial.line1")}</Text> : null}
+          {!exaConfigured ? <Text>{t("panel.trial.line1")}</Text> : null}
           {keyCards.map((card, index) => (
             <Inline key={asString(card.fingerprint, String(index))} gap={3} wrap justify="space-between">
               <Inline gap={2} wrap>
@@ -684,56 +650,6 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
             disabled={busy("fallback") || !keyFallbackKnown || !canCall("set_key_fallback")}
             onChange={(value) => toggleKeyFallback(value)}
           />
-          <Grid cols={2}>
-            <StatCard label={t("panel.any.label")} value={maskOrDash(anyMasked)} />
-            <StatCard label={t("panel.any.stateLabel")} value={anyKeyBadge()} />
-          </Grid>
-          <Accordion id="any-key" title={t("panel.any.accTitle")} open={false}>
-            <Text>{t("panel.any.help")}</Text>
-            <Field
-              label={t("panel.any.fieldLabel")}
-              help={t("panel.any.fieldHelp")}
-              error={anyError}
-              required
-            >
-              <PasswordInput
-                value={anyDraft}
-                placeholder={t("panel.any.placeholder")}
-                disabled={pending === "anysave"}
-                onChange={(value) => setAnyDraft(value)}
-              />
-            </Field>
-            <Inline gap={3} wrap>
-              <Button
-                tone="success"
-                disabled={busy("anysave") || !canCall("set_anysearch_key")}
-                onClick={saveAnyKey}
-              >
-                {label("anysave", "panel.actions.saveKey")}
-              </Button>
-              <Button
-                tone="info"
-                disabled={busy("anytest") || !canCall("test_anysearch_key")}
-                onClick={testAnyKey}
-              >
-                {label("anytest", "panel.actions.testOne")}
-              </Button>
-              {anyMasked ? (
-                <Button
-                  tone="danger"
-                  disabled={busy("anyclear") || !canCall("clear_anysearch_key")}
-                  onClick={clearAnyKey}
-                >
-                  {label("anyclear", "panel.actions.removeOne")}
-                </Button>
-              ) : null}
-            </Inline>
-          </Accordion>
-          <Accordion id="keys-help" title={t("panel.keys.helpTitle")} open={false}>
-            <Text>{t("panel.keys.help")}</Text>
-            <Text>{t("panel.key.fallbackHelp")}</Text>
-            <Text>{quotaNote}</Text>
-          </Accordion>
           {lastError ? <Alert tone="warning">{lastError}</Alert> : null}
           {replaceOpen ? renderKeyField("panel.guide.keyField.placeholderReplace") : null}
           <Inline gap={3} wrap>
@@ -774,12 +690,118 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
                 {label("clear", "panel.actions.clearAll")}
               </Button>
             ) : null}
-            <Button tone="default" disabled={busy("guide") || !canCall("show_guide")} onClick={openGuide}>
-              {label("guide", "panel.actions.showGuide")}
-            </Button>
           </Inline>
+          {/* The old first-run guide lives here now, and folds itself once a key exists. */}
+          <Accordion id="exa-register" title={t("panel.exa.accRegister")} open={!exaConfigured}>
+            <Steps>
+              <Step index="1" title={t("panel.guide.step1.title")}>
+                <Stack>
+                  <Text>{t("panel.guide.step1.line1")}</Text>
+                  <CodeBlock>{EXA_KEY_PAGE}</CodeBlock>
+                  <Inline gap={2} wrap>
+                    <Button tone="default" onClick={() => copyRegisterUrl(EXA_KEY_PAGE)}>
+                      {t("panel.guide.copyUrl")}
+                    </Button>
+                    <Text>{t("panel.guide.step1.line1b")}</Text>
+                  </Inline>
+                  <Text>{t("panel.guide.step1.line2")}</Text>
+                  <Text>{t("panel.guide.step1.line3")}</Text>
+                  <Text>{t("panel.guide.step1.qIntro")}</Text>
+                  <Text>{t("panel.guide.step1.q1")}</Text>
+                  <Text>{t("panel.guide.step1.q2")}</Text>
+                  <Text>{t("panel.guide.step1.q3")}</Text>
+                  <Text>{t("panel.guide.step1.qAfter")}</Text>
+                  <Text>{t("panel.guide.freeNote")}</Text>
+                </Stack>
+              </Step>
+              <Step index="2" title={t("panel.exa.step2.title")}>
+                <Text>{t("panel.exa.pasteLine")}</Text>
+              </Step>
+              <Step index="3" title={t("panel.exa.step3.title")}>
+                <Text>{t("panel.exa.saveLine")}</Text>
+              </Step>
+            </Steps>
+          </Accordion>
+          <Accordion id="keys-help" title={t("panel.keys.helpTitle")} open={false}>
+            <Text>{t("panel.keys.help")}</Text>
+            <Text>{t("panel.key.fallbackHelp")}</Text>
+            <Text>{quotaNote}</Text>
+            <Text>{t("panel.guide.quota")}</Text>
+          </Accordion>
           {!actionRegistryLoaded ? <Text>{t("panel.errors.actionRegistryMissing")}</Text> : null}
         </Stack>
+      </Card>
+    )
+  }
+
+  function renderAnyCard() {
+    return (
+      <Card title={t("panel.any.title")}>
+        <Stack>
+          <Grid cols={2}>
+            <StatCard label={t("panel.any.label")} value={maskOrDash(anyMasked)} />
+            <StatCard label={t("panel.any.stateLabel")} value={anyKeyBadge()} />
+          </Grid>
+          <Text>{t("panel.any.line")}</Text>
+          <Field
+            label={t("panel.any.fieldLabel")}
+            help={t("panel.any.fieldHelp")}
+            error={anyError}
+            required
+          >
+            <PasswordInput
+              value={anyDraft}
+              placeholder={t("panel.any.placeholder")}
+              disabled={pending === "anysave"}
+              onChange={(value) => setAnyDraft(value)}
+            />
+          </Field>
+          <Inline gap={3} wrap>
+            <Button
+              tone="success"
+              disabled={busy("anysave") || !canCall("set_anysearch_key")}
+              onClick={saveAnyKey}
+            >
+              {label("anysave", "panel.actions.saveKey")}
+            </Button>
+            <Button
+              tone="info"
+              disabled={busy("anytest") || !canCall("test_anysearch_key")}
+              onClick={testAnyKey}
+            >
+              {label("anytest", "panel.actions.testOne")}
+            </Button>
+            {anyMasked ? (
+              <Button
+                tone="danger"
+                disabled={busy("anyclear") || !canCall("clear_anysearch_key")}
+                onClick={clearAnyKey}
+              >
+                {label("anyclear", "panel.actions.removeOne")}
+              </Button>
+            ) : null}
+          </Inline>
+          <Accordion id="any-register" title={t("panel.any.accRegister")} open={!anyConfigured}>
+            <Text>{t("panel.any.help")}</Text>
+            <Text>{t("panel.any.registerLine1")}</Text>
+            <CodeBlock>{ANYSEARCH_KEY_PAGE}</CodeBlock>
+            <Inline gap={2} wrap>
+              <Button tone="default" onClick={() => copyRegisterUrl(ANYSEARCH_KEY_PAGE)}>
+                {t("panel.guide.copyUrl")}
+              </Button>
+              <Text>{t("panel.guide.step1.line1b")}</Text>
+            </Inline>
+            <Text>{t("panel.any.registerLine2")}</Text>
+          </Accordion>
+        </Stack>
+      </Card>
+    )
+  }
+
+  function renderAccountNoteCard() {
+    return (
+      <Card title={t("panel.note.title")}>
+        <Text>{t("panel.note.mail")}</Text>
       </Card>
     )
   }
@@ -979,18 +1001,19 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
 
   function renderHome() {
     // Three panes instead of one long scroll: what happened / what you can change /
-    // how to debug it. Tab state lives in the kit's module-level map, so it resets
-    // when the panel frame reloads -- the panel is a viewer, not a workspace.
+    // how to debug it. The built-in-search card belongs to "what happened" -- it is a
+    // fact about the host, not something this plugin configures. Keys are two separate
+    // cards because the two providers do different jobs (a ring vs a single upgrade).
     const tabs = [
       {
         id: "status",
         label: t("panel.tabs.status"),
-        content: <Stack>{renderLastSearchCard()}{renderChainCard()}</Stack>,
+        content: <Stack>{renderLastSearchCard()}{renderChainCard()}{renderHostCard()}</Stack>,
       },
       {
-        id: "setup",
-        label: t("panel.tabs.setup"),
-        content: <Stack>{renderKeyCard()}{renderHostCard()}{renderProxyCard()}</Stack>,
+        id: "advanced",
+        label: t("panel.tabs.advanced"),
+        content: <Stack>{renderExaCard()}{renderAnyCard()}{renderAccountNoteCard()}{renderProxyCard()}</Stack>,
       },
       {
         id: "diag",
@@ -1009,7 +1032,7 @@ export default function BetterWebSearchPanel(props: PluginSurfaceProps<PanelStat
   return (
     <Page title={t("panel.title")} subtitle={t("panel.subtitle")}>
       <Stack>
-        {stage === "welcome" ? renderGuide() : renderHome()}
+        {showStart ? renderStartPage() : renderHome()}
       </Stack>
     </Page>
   )

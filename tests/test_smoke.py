@@ -15,8 +15,6 @@ PANEL_ENTRY_IDS = [
     "clear_anysearch_key",
     "set_key_fallback",
     "get_host_search",
-    "set_onboarding",
-    "show_guide",
     "diagnose_network",
     "set_ssrf_guard",
 ]
@@ -270,21 +268,32 @@ def _visible_copy(block: str, catalog: dict) -> dict:
 
 
 def test_panel_layout_is_tabs_plus_folded_explanations() -> None:
-    """The three panes and the folding are the design; lock them in.
+    """The check-first screen, the three panes and the folding are the design; lock them in.
 
     The panel used to be one scroll page of 2.8k characters, and the kit's <Tip>
     renders as a bordered amber box -- four of those per card is what actually made
-    it read as clutter. Detail now lives in Accordions that start closed.
+    it read as clutter. Detail now lives in Accordions, and the first screen checks
+    whether the host's built-in search is still running instead of teaching keys.
     """
     root = Path(__file__).resolve().parents[1]
     tsx = (root / "ui" / "panel.tsx").read_text(encoding="utf-8")
     assert "<Tip>" not in tsx, "Tip renders as an amber box; use Accordion or Text"
     assert "<Tabs" in tsx
     home = tsx.split("function renderHome", 1)[1]
-    for pane in ("renderKeyCard()", "renderHostCard()", "renderProxyCard()",
-                 "renderLastSearchCard()", "renderChainCard()", "renderDiagnoseCard()"):
+    for pane in ("renderLastSearchCard()", "renderChainCard()", "renderHostCard()",
+                 "renderExaCard()", "renderAnyCard()", "renderAccountNoteCard()",
+                 "renderProxyCard()", "renderDiagnoseCard()"):
         assert pane in home, f"{pane} left the tab layout"
-    assert "renderTrialCard" not in tsx          # folded into the key card as an Alert
+    # The gate is an objective check, and "state unreadable" must not nag.
+    assert "showStart ? renderStartPage() : renderHome()" in tsx
+    assert "hostKnown && hostRunning" in tsx
+    # Two providers, two cards -- they used to share one and read as a mess.
+    assert "renderKeyCard" not in tsx
+    assert "panel.tabs.advanced" in tsx
+    # Each tutorial folds itself away once that provider's key exists.
+    assert tsx.count("open={!exaConfigured}") == 1
+    assert tsx.count("open={!anyConfigured}") == 1
+    assert "renderTrialCard" not in tsx          # folded into the Exa card as a Text line
     assert tsx.count("<Accordion") >= 6
 
 
@@ -372,7 +381,7 @@ def test_default_config_sections_present_in_example() -> None:
         assert section in example
     for key in ("exa_api_keys", "exa_tool",
                 "exa_key_fallback_anonymous", "baidu_warmup",
-                "duckduckgo_needs_proxy", "ssrf_allow_ranges", "onboarding_stage",
+                "duckduckgo_needs_proxy", "ssrf_allow_ranges",
                 "first_run_notice_sent"):
         assert key in example, f"config.example.toml missing {key}"
 
