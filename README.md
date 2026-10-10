@@ -1,8 +1,11 @@
 # 更好的网络搜索 / Better Web Search
 
-给 N.E.K.O 的免 API Key 联网搜索 + 网页正文阅读插件。**装好就能用，不需要注册任何服务、不需要填任何 Key。**
+给 N.E.K.O 的免 API Key 联网搜索 + 网页正文阅读插件。**安装并启动即可使用，不需要注册或填 Key。** 匿名来源受网络与公共限流影响，不承诺无限额度或始终可用。
 
-一个不需要任何 API Key 的联网搜索与网页正文阅读插件，开箱即用，失败自动切换后端。插件自带面板：首装猫娘会开口引导；**首屏只做一件事**——查宿主内置『网络搜索』还在不在跑，还在跑就把用户指到宿主的「插件中心」去停用（停用后这一页不再出现，读不到状态时也不弹）。进入后分**状态 / 进阶 / 诊断**三区（`Tabs`），长段解释一律收在默认收起的折叠块里，首屏只留徽章、数字和主操作。Exa 与 AnySearch 两家密钥各自一卡、各自带注册教程（做了就自动收起）：Exa 可填多把轮着用，AnySearch 只有一把、填了当场真搜一次验货；另有代理软件兼容开关与一键网络自检。
+面板分 **概览 / 设置 / 诊断**：概览直接显示免 Key 模式、实际搜索记录和当前链路；
+设置中的「可选增强 · 密钥」默认收起，没有密钥不是警告或未完成步骤；
+诊断先显示结论，来源明细按需展开。内置搜索仅显示共存状态，不挡住面板，也不替用户停用。
+Exa 多把轮转、AnySearch 单把管理和代理兼容功能继续保留，详细操作见 [接入教程](docs/quickstart.md)。
 
 ---
 
@@ -10,17 +13,20 @@
 
 大多数"免费搜索插件"其实是去爬搜索引擎的搜索结果页，这条路会被限流、会被反爬、而且在国内经常根本连不上。这个插件的主路径不是爬页面，而是走**别人公开免费的检索网关**：
 
-下表为 mainland 直连实测（系统代理关闭、无环境代理，plan §0 同款环境）：
+下表是历史网络实测，不代表每台机器的当前可用性。2026-10-10 本机空密钥、
+强制直连各探测一次：AnySearch / Exa / Bing / 百度均返回 3 条可解析结果，
+耗时约 3.7 / 2.7 / 0.7 / 1.0 秒。Bing 对带点项目名的相关性较弱，
+因此保留 AnySearch → Exa → Bing → 百度的默认顺序，不以延迟单独排序。
 
 | 后端 | 要不要 Key | 原理 | 国内直连（实测） |
 | --- | --- | --- | --- |
 | `anysearch`（默认首选） | 不要（可选填） | AnySearch 的匿名档 | ✅ 1.2–5.0s |
-| `exa`（填了自己的 Key 就升到首位） | 不要（可选填自己的免费 Key） | Exa 的公共 MCP 端点 `mcp.exa.ai`，对方替所有匿名用户付钱 | ✅ 快路径约 1.0–2.0s（2026-09-19 真机五次实测 1.8–2.0s），返回标题+链接+高亮片段 |
+| `exa`（仅有 Exa Key 时默认升到首位） | 不要（可选填自己的 Key） | Exa 的公共 MCP 匿名端点 `mcp.exa.ai` | ✅ 快路径约 1.0–2.0s（2026-09-19 真机五次实测 1.8–2.0s），返回标题+链接+高亮片段 |
 | `bing` | 不要 | 抓结果页 | ✅ 约 0.6s，中英文都好，已进默认链路 |
 | `baidu` | 不要 | 抓结果页 + BAIDUID 预热 | ❌ 直连裸请求回"百度安全验证"（HTTP 200 验证页），预热才有救，排链路末位 |
 | `duckduckgo` | 不要 | 抓 `html.duckduckgo.com` 的结果页 | ❌ 直连 DNS 污染直接超时；**没检测到代理时根本不会进实际链路**（见 `duckduckgo_needs_proxy`） |
 | `sogou` | 不要 | 抓结果页 | ❌ 实测无可解析结果，不进默认链路 |
-| `searxng` | 不要 | **你自己的**实例，唯一真正不受别人限流的路 | 自己部署 |
+| `searxng` | 不要 | **你自己的**实例，不依赖共享网关，但上游搜索引擎仍可能限流 | 自己部署 |
 
 `anysearch` 排第一是这一版定的默认顺序。理由是 `exa` 的免 Key 档为所有匿名用户共用同一个池子，问得快就会撞 429（插件里那句「Exa 免配额已用完（429）」就是它），不该让整条链路的第一次尝试压在这个公共池上。**唯一的例外**：`exa_api_keys` 里至少有一把、而 `anysearch_api_key` 还空着 → `exa` 自动升到第一位，这时它走的是你自己账号的额度，不与他人抢。`[search] backend` 显式选定引擎时仍然优先于这条规则。
 
@@ -30,15 +36,15 @@
 
 > 如果你愿意拿延迟换更长的正文片段，可以把 `exa_tool` 显式改成 `advanced`（返回页正文、但实测 3.7–11.7s，会接近单后端 12s 超时）。默认**不**这么做。
 
-### 想更稳？填 Exa 免费 Key（可选，不是必需），一把不够就填几把
+### 可选增强：填写 Exa Key，不是必需
 
 - 注册地址 <https://dashboard.exa.ai/api-keys>，国内**直连可达**；登录只有 Google / Email 两种方式，国内建议走 **Email 注册**。
-- 免费档 = 注册送 $20，之后**每月刷新 $10**；≈ **1400 次/月 ≈ 47 次/天**。
-- 计费口径：Exa 定价页写的是 *$7 per 1k requests (up to 10 results)*，**一次请求最多 10 条不加价**，超出部分另计 $1/1k。本插件走 `https://mcp.exa.ai/mcp` 的 `web_search_exa` 工具（带 Key 也是同一个端点，Key 放在 `x-api-key` 头），实测响应里 `costDollars.total = 0.007`，且 numResults 取 2/6/10 **同价**（`docs/plan-v0.2.md` §0）。所以 1400 次/月这个数只在"每次 ≤10 条"时成立；我们允许 `max_results` 到 15，模型要满 15 条的那次大约是 $0.012。
-- 不填 Key 照样能搜。填 Key 买到的是**额度确定性**和**链路首位**，不是速度：实测 advanced 档 3.7–11.7s 会顶穿 12s 预算，所以 `exa_tool = "auto"` 恒用快路径（带不带 Key 都一样）。
+- 免费额度、计费和限流以账号控制台及服务商当前规则为准；插件不承诺固定月额度或请求次数。保存和测试密钥也会发起真实请求，配置前请检查付费及自动充值设置。
+- 本插件走 `https://mcp.exa.ai/mcp` 的 `web_search_exa` 工具，密钥放在 `x-api-key` 请求头。历史费用实测见 `docs/plan-v0.2.md` §0，不应将当时的费用推算成当前套餐承诺。
+- 不填 Key 照样能搜。Key 使用账号额度，不保证更快或始终可用；仅配置 Exa Key 而无 AnySearch Key 时，默认把 Exa 提到链首。`exa_tool = "auto"` 恒用快路径（带不带 Key 都一样）；advanced 档的历史实测为 3.7–11.7s，接近单后端预算。
 - **一把不够用就填多把（环形轮转，没有计时器）**：`exa_api_keys` 是一个列表，一个 Exa 账号一把 Key。一次搜索从**上一把成功的那把**开始，这把报错就顺延下一把，走到列表末尾再绕回开头。所以一把用坏的钥匙，要等其它每把都轮过一遍才会再被试一次——**循环本身就是重试节奏**，不需要额外记"歇到几点"。顺移的条件是**这把答得不对**（401 / 402 / 429、5xx、给了段解析不出来的响应）；**根本没答上**（超时、连不上）时不去撞下一把，见下条。
 - **重启不会把循环打回原点**：环停在哪儿，就按密钥的指纹记在宿主给插件的 KV 存储里，插件或软件重启后从同一把继续。只有位置真的移动时（也就是一把用坏时）才写一次；存储不可用只记日志，不影响搜索。落盘这个动作挂在**搜索**的收尾，`fetch` 走同一个环、也会挪内存里的起点，但不单独写存储，所以只读网页、没再搜过的话，重启最多退回上一次搜索记下的那把（偏一把，下一次搜索就校准了）。
-- **整池都报错、或 Exa 压根连不上 = 整条 Exa 链路进退避期**：这两种情况抛的都是 `BlockedError`，正好复用协调器已有的后端冷却（`cooldown_seconds`），下一次搜索不会把整个环再跑一遍，而是直接改走 anysearch / 必应。连不上时**一把都不多试**是有意的：首后端独享 `total_timeout_seconds` 这 25 秒，让 N 把钥匙各自挂满 12 秒的代价不是"慢一点"，是 anysearch 和必应一分预算都拿不到、这一轮真的搜不到东西。这条边界由 `tests/test_entries.py::test_a_hang_rotates_nothing_and_hands_exa_to_the_cooldown` 钉住。
+- **整池都报错、或 Exa 连不上时进入后端冷却**：复用 `cooldown_seconds`，后续搜索改走其它来源。一次尝试的完整耗时（包括排队、密钥轮转与收尾）不超过单后端预算，并给后续来源预留时间；整轮仍受 `total_timeout_seconds` 限制。连不上时不挨个尝试其余密钥，避免对同一条失败网络重复请求。
 - **要不要降级成无 Key 是一个开关，默认关闭**：`exa_key_fallback_anonymous = false`。关掉的理由很实际——池子都空了时匿名档通常也不通，不如把 25 秒预算留给下一个后端。设为 `true` 时的行为是：整环跑完 → 匿名档试一次（只一次，不循环）→ 失败就交给后端链。
 - **401/403 会写明"这把没验通过"**，面板逐把显示状态；`fetch` 读正文走同一个环，不会刚在搜索里撞死、转头又拿它抓网页。
 - **429 顺移但绝不定罪**：Exa 用 402 表示没钱、用 429 表示问得太快（见其 billing 文档）。带 Key 的 429 只是**换一把继续**（不同账号各有自己的限速），不会在面板上留下"额度用完"的标记——否则手快连点两下就能把整个池子误杀掉。同理 5xx 与"解析不出来"也只顺移；**能写显示状态的只有 401/403 与 402**。
@@ -55,7 +61,11 @@
 
 `fetch` 带 SSRF 防护：`localhost`、`127.0.0.1`、`192.168.x.x`、`169.254.169.254`（云元数据地址）、`*.local`、以及解析到内网的域名、`javascript:` / `ftp:` 之类协议，全部拒绝。唯一例外是 `[net] ssrf_allow_ranges`（默认 `198.18.0.0/15`）：兼容 TUN + fake-ip 代理把外网域名解析成假 IP 的情况，且**只对域名解析结果放行**——直接把 IP 填进链接照样拒绝。
 
-面板里还有：**「最近一次搜索」回看卡**（哪一路答的、几条、多久、依次试过哪几路——这些原本只在插件日志里，宿主不记插件的工具返回体，所以面板是唯一能看到的地方；只记关键词字数，不记内容，重启插件即清空）、**「Exa 密钥」卡**（多把轮转，教程收在「怎么拿到一把 Exa 密钥」折叠块里，池子里已经有钥匙时它自己收起）、「**AnySearch 密钥**」卡（同样带注册教程，一家一卡不再混排）、一张「密钥账号小提醒」（两家都能退订广告邮件、账号与密钥照常用）、宿主内置『网络搜索』的**状态只读显示**（避免两个搜索插件抢活；要停用请到宿主的「插件中心」，原因见下）、**「代理软件兼容」开关**（Clash/mihomo 的 TUN + fake-ip 模式下面板一键切，不需要你懂 CIDR）、网络自检（默认跟随检测到的代理决定是否**直连/代理双测**，也可手动固定；双测会把探测次数翻倍，结果表格里"走代理能不能用"单独一列，未测不等于用不了）。
+面板只记录最近一次搜索的来源、结果数量、耗时和查询字数，不保留查询内容，重启清空。
+密钥统一位于「设置」的默认收起分组，未测试的密钥不计入验证通过数量；
+注册教程移到接入教程，面板仅保留控制台地址。代理兼容单独显示。
+自检不会自动修改搜索顺序，「未测」不表示不可用。
+宿主内置搜索状态始终只读：保留或停用由用户决定，停用的影响如下。
 
 > **为什么停用内置要用户自己动手**：v0.9.7 及之前，面板这个开关是替用户去按宿主的本地管理接口
 > （`POST /plugin/web_search/stop`）。真机测量：宿主正在重载插件列表时那一按要 8 秒以上才回话，
@@ -196,7 +206,7 @@ duckduckgo_proxy = "proxy"  # DDG 在国内直连不通，默认强制走代理
 bing_proxy = "direct"       # 百度/必应/搜狗保持直连，不要白白绕代理
 
 # Exa 密钥（可选升级）：更推荐在插件面板里逐把填写并一键测试
-exa_api_keys = []           # 一个账号一把；邮箱注册每账号每月 $10：https://dashboard.exa.ai/api-keys
+exa_api_keys = []           # 可选；账号额度以控制台为准：https://dashboard.exa.ai/api-keys
 exa_tool = "auto"           # auto 恒用快路径（advanced 实测会顶穿 12s 预算，仅显式选择时才用）
 exa_key_fallback_anonymous = false    # 开关：整池密钥都报错时要不要再降级匿名档（默认关闭）
 baidu_warmup = true         # 先领 BAIDUID cookie 再搜，否则基本必撞"百度安全验证"
@@ -214,7 +224,7 @@ ssrf_allow_ranges = ["198.18.0.0/15"]   # TUN+fake-ip 兼容，只对域名解�
 
 ## 开发
 
-当前目录既是插件源码，也是它自己的 Git 仓库。发版到插件市场时，GitHub 仓库名必须是：
+当前目录是插件源码；发布需要有 Git 历史和远端的检出。发版到插件市场时，GitHub 仓库名必须是：
 
 ```text
 n.e.k.o_plugin_better_web_search
@@ -242,25 +252,38 @@ uvx ruff==0.12.4 check --ignore-noqa --config ruff.toml .
 > `[OK]` 却不出 `plugin.meta.json`，面板按钮全部 404。判断标准是构建后自验包里有没有 `plugin.meta.json`，
 > 而不是命令有没有报错。
 
-单元测试是**离线**的（`tests/fixtures/` 里是真实响应结构，不联网）：
+日常回归优先使用下面的隔离入口。单元测试是**离线**的（`tests/fixtures/` 是真实响应结构），
+读取真实宿主 SDK，但不执行宿主包初始化；文件日志边界替换为空日志，避免启动宿主或触发日志清理。
+上面的宿主 CLI 检查与构建不是隔离测试，留到明确需要打包时使用。
 
-```bash
-uv run --project "../N.E.K.O" python -m pytest -c tests/pytest.ini tests -q
+```powershell
+uv run --no-project --with pytest --with pydantic --with pyzmq --with ormsgpack python -B tests/run_with_sdk.py --sdk-root '../N.E.K.O' -c tests/pytest.ini -p no:cacheprovider tests -q
+uvx ruff==0.12.4 check --ignore-noqa --config ruff.toml .
 ```
 
-面板 `ui/panel.tsx` **也能真类型检查**，不用装宿主的 `frontend/node_modules`（宿主那个
-`check-hosted-tsx.mjs` 才需要）：临时装一个 typescript，拿宿主 SDK 里现成的 `.d.ts` 当声明文件即可。
+面板类型检查和离线预览只读取宿主 UI SDK 声明与运行时，不需要安装宿主前端依赖，
+也不调用宿主管理接口。工具依赖与预览产物仅放在插件的忽略目录中，不进入分发包。
 
-```bash
-mkdir -p /tmp/tscpkg && cd /tmp/tscpkg && npm install typescript@5.6 --no-fund --no-audit
-# tsconfig 照抄宿主 plugin/sdk/hosted-ui/tsconfig.json 的 compilerOptions
-# （jsx react + jsxFactory h + jsxFragmentFactory Fragment + paths @neko/plugin-ui），
-# baseUrl 指到 <宿主>/plugin/sdk，files 带 globals.d.ts，include 指本仓库的 ui/panel.tsx
-node /tmp/tscpkg/node_modules/typescript/bin/tsc -p /tmp/tsx-check/tsconfig.json
+```powershell
+npm install --prefix tests/.tooling --no-fund --no-audit --no-package-lock --no-save typescript@5.6.3 sucrase@3.35.0
+node tests/check_panel.mjs
+node tests/panel_preview.mjs
 ```
 
-建议开 `noUnusedLocals`：JSX 结构改完之后，它能抓出多余的 import（比如说明搬进 Accordion 之后就
-没人用的 `Tip`）。**这挡不住渲染问题**，版式仍然要人在真机看一遍。
+打开 `tests/artifacts/panel-preview.html` 即可查看**离线 UI 预览**。动作和状态使用测试替身，
+不代表插件已安装或真实网络可用。类型检查启用 `strict`、`noUnusedLocals` 和 `noUnusedParameters`。
+
+浏览器回归还需要可解析的 Playwright 模块和已安装的 Chrome。如果本机尚无 Playwright，
+可将它与上述工具依赖一起安装到 `tests/.tooling`，再运行：
+
+```powershell
+$env:NODE_PATH = (Resolve-Path tests/.tooling/node_modules).Path
+$env:PLAYWRIGHT_CHANNEL = 'chrome'
+node tests/check_browser.mjs
+```
+
+浏览器检查覆盖中英文、1120 / 375 / 320 像素宽度、密钥保存掩码和删除确认、设置开关、诊断明细、
+空链路与未知宿主状态；截图输出至 `tests/artifacts/`。这些检查不能替代安装后的宿主集成验证。
 
 > `-c tests/pytest.ini` 不能省：本仓库根目录就是插件包（有 `__init__.py`），pytest 8/9 会为 rootdir 到用例之间的每层目录建 Package 节点并去 import 根 `__init__.py`，而插件独立检出时它无法作为包被导入，全部用例会在 setup 阶段集体 CollectError。把 rootdir 收进 `tests/` 就没这个节点（与宿主 `plugin/tests/pytest.ini` 同一约定）。
 
@@ -279,9 +302,7 @@ _resilience.py   缓存、并发合并、限流、失败退避（含 ApiKeyRejec
 _guard.py        fetch 的 SSRF 防护（allow_ranges 只对域名解析结果生效）
 _host.py         宿主内置 web_search 的状态读取（只读；只走宿主公开回环 API，不含任何 start/stop）
 _diagnose.py     网络自检编排（纯逻辑，probe 闭包由 __init__.py 注入）
-ui/panel.tsx     面板：首屏是"内置还在跑吗"的检查页 + Tabs 三区（状态=最近一次搜索/来源链路/内置搜索状态 · 进阶=Exa 密钥 ·
-                 AnySearch 密钥 · 账号提醒 · 代理兼容 · 诊断=网络自检），解释与注册教程一律放进默认收起的 Accordion，
-                 首屏只留徽章、数字与主操作
+ui/panel.tsx     概览 / 设置 / 诊断；可选密钥默认收起，内置搜索只读且不阻断首屏
 docs/quickstart.md  接入教程
 tests/           离线用例 + 真实响应夹具（**不进分发包**，见 pyproject 的 [tool.neko.build]）
 docs/plan-*.md   施工单，内部文档（**不进分发包**）
@@ -308,8 +329,8 @@ uv run --project "../N.E.K.O" python -m plugin.neko_plugin_cli publish .
 | 条件 | 代码位置 | 本仓库现状 |
 | --- | --- | --- |
 | git origin 的仓库名必须是 `n.e.k.o_plugin_<插件 id>`，**且全小写** | `release_cmd.py:230-232`（命令行比对用 `casefold()`，投稿页比对区分大小写） | ✅ 2026-09-20 已把 GitHub 仓库名改成 `n.e.k.o_plugin_better_web_search`，本地 `git remote` 同步跟上 |
-| tag 去掉 `v` 前缀后必须等于 `plugin.toml` 的 `version` | `release_cmd.py:237-239` | ✅ 当前 `plugin.toml` 是 `0.9.7`，要打的 tag 是 `v0.9.7`；`tests/test_smoke.py::test_release_version_is_stated_once` 保证 `plugin.toml` 与 `pyproject.toml` 不打架 |
-| `[plugin].version` 必须至少三段数字 | `validate_cmd.py:181`（`^\d+\.\d+\.\d+.*$`） | ✅ 写成 `0.97` 会直接 error，所以这里是 `0.9.7` |
+| tag 去掉 `v` 前缀后必须等于 `plugin.toml` 的 `version` | `release_cmd.py:237-239` | 当前源码版本为 `1.0.0`；本轮优化未重新打包或发布，发布前需确定新版本和对应 tag |
+| `[plugin].version` 必须至少三段数字 | `validate_cmd.py:181`（`^\d+\.\d+\.\d+.*$`） | 当前为 `1.0.0`；测试同时保证 `plugin.toml` 与 `pyproject.toml` 版本一致 |
 
 > 代码侧的发布条件都已验证过，剩下的只有"打 tag + 投稿 Market"这一步人工动作：`v0.9.6` 是本仓库第一个真正
 > 打上 tag 的版本（tag 在 `origin/main` 上）。发新版前照例确认推送的那棵树就是你要发的那一棵。

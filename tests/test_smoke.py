@@ -242,10 +242,11 @@ def test_host_card_recommends_stopping_and_still_discloses_the_cost() -> None:
                     "panel.host.lostTopic", "panel.host.unaffected"):
         assert removed not in tsx, f"{removed} came back without being asked for"
     zh, en = _load_locale("zh-CN"), _load_locale("en")
-    assert "强烈推荐" in zh["panel.host.title"]
-    assert "recommend" in en["panel.host.title"].lower()
+    assert zh["panel.host.title"] == "内置搜索"
+    assert en["panel.host.title"] == "Built-in search"
     assert "凭记忆" in zh["panel.host.gate"]
     assert "窗口" in zh["panel.host.impact"] and "梗和音乐" in zh["panel.host.impact"]
+    assert "不会改走本插件" in zh["panel.host.impact"]
     assert "5 分钟" in zh["panel.host.tradeoff"] and "cooldown" in en["panel.host.tradeoff"]
     for text in (zh["panel.host.why"], zh["panel.host.gate"], zh["panel.host.impact"]):
         assert "每次都会搜" not in text and "就一定会" not in text
@@ -268,33 +269,54 @@ def _visible_copy(block: str, catalog: dict) -> dict:
 
 
 def test_panel_layout_is_tabs_plus_folded_explanations() -> None:
-    """The check-first screen, the three panes and the folding are the design; lock them in.
-
-    The panel used to be one scroll page of 2.8k characters, and the kit's <Tip>
-    renders as a bordered amber box -- four of those per card is what actually made
-    it read as clutter. Detail now lives in Accordions, and the first screen checks
-    whether the host's built-in search is still running instead of teaching keys.
-    """
+    """Optional credentials and host coexistence must never become setup gates."""
     root = Path(__file__).resolve().parents[1]
     tsx = (root / "ui" / "panel.tsx").read_text(encoding="utf-8")
     assert "<Tip>" not in tsx, "Tip renders as an amber box; use Accordion or Text"
     assert "<Tabs" in tsx
     home = tsx.split("function renderHome", 1)[1]
-    for pane in ("renderLastSearchCard()", "renderChainCard()", "renderHostCard()",
-                 "renderExaCard()", "renderAnyCard()", "renderAccountNoteCard()",
+    for pane in ("renderLastSearchCard()", "renderOverview()", "renderHostCard()",
+                 "renderExaCard()", "renderAnyCard()",
                  "renderProxyCard()", "renderDiagnoseCard()"):
         assert pane in home, f"{pane} left the tab layout"
-    # The gate is an objective check, and "state unreadable" must not nag.
-    assert "showStart ? renderStartPage() : renderHome()" in tsx
-    assert "hostKnown && hostRunning" in tsx
-    # Two providers, two cards -- they used to share one and read as a mess.
+    assert "renderStartPage" not in tsx and "showStart" not in tsx
+    assert "renderAccountNoteCard" not in tsx
+    assert "<Card" not in tsx and "<StatCard" not in tsx
     assert "renderKeyCard" not in tsx
     assert "panel.tabs.advanced" in tsx
-    # Each tutorial folds itself away once that provider's key exists.
-    assert tsx.count("open={!exaConfigured}") == 1
-    assert tsx.count("open={!anyConfigured}") == 1
-    assert "renderTrialCard" not in tsx          # folded into the Exa card as a Text line
+    for accordion in ("optional-keys", "exa-register", "any-register", "diag-results"):
+        tag = re.search(rf'<Accordion id="{accordion}"[^>]+>', tsx)
+        assert tag and "open={false}" in tag.group(), f"{accordion} is not folded by default"
+    assert "renderTrialCard" not in tsx
     assert tsx.count("<Accordion") >= 6
+    assert _load_locale("zh-CN")["panel.tabs.status"] == "概览"
+    assert _load_locale("zh-CN")["panel.tabs.advanced"] == "设置"
+
+
+def test_optional_keys_are_neutral_and_unverified_keys_are_not_counted_as_working() -> None:
+    tsx = (_ROOT / "ui" / "panel.tsx").read_text(encoding="utf-8")
+    assert 'keyCards.filter((card) => card.state === "ok")' in tsx
+    assert "usableKeys" not in tsx
+    for function in ("keyBadge", "anyKeyBadge"):
+        body = tsx.split(f"function {function}", 1)[1].split("\n  function ", 1)[0]
+        assert '<StatusBadge tone="default" label={t("panel.key.notSaved")}' in body
+    for key in ("panel.mode.keyless", "panel.mode.enhanced", "panel.actions.replaceKey"):
+        for locale in ("zh-CN", "en"):
+            assert key in _load_locale(locale)
+
+
+def test_panel_uses_effective_chain_without_reinterpreting_it() -> None:
+    tsx = (_ROOT / "ui" / "panel.tsx").read_text(encoding="utf-8")
+    assert "Array.isArray(safeState.effective_chain)" in tsx
+    assert 'filter((item) => item.toLowerCase() !== "duckduckgo")' not in tsx
+    assert '!asString(hostSearch.error, "")' in tsx
+
+
+def test_diagnostics_do_not_repeat_the_summary_as_a_notice() -> None:
+    tsx = (_ROOT / "ui" / "panel.tsx").read_text(encoding="utf-8")
+    body = tsx.split("async function runDiagnose", 1)[1].split("\n  function ", 1)[0]
+    assert "if (!ok && !rows.length) showNotice(summary, true)" in body
+    assert "showNotice(summary, !ok)" not in body
 
 
 def test_visible_panel_copy_stays_inside_budget() -> None:
@@ -465,4 +487,3 @@ def test_packaging_excludes_dev_payload_but_keeps_ui_files() -> None:
     assert _excluded_from_package("tests/fixtures/bing_html.html", rules)
     assert _excluded_from_package("docs/plan-v0.2.md", rules)
     assert _excluded_from_package("x/__pycache__/y.pyc", rules)
-

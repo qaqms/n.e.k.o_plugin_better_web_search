@@ -466,7 +466,7 @@ def _search_exa_tool(query: str, limit: int, *, timeout: float, policy: str,
 
 def search_exa(query: str, limit: int, *, timeout: float, policy: str, proxy_url: str,
                live_crawl: bool = False, api_key: str = "", tool: str = "auto") -> list[dict[str, str]]:
-    """Search Exa MCP, selecting the keyless fast path or keyed advanced path."""
+    """Search Exa MCP; auto uses the fast tool with or without a key."""
     key = (api_key or "").strip()
     if tool not in {"auto", "advanced", "simple"}:
         raise ValueError("Exa tool must be one of: auto, advanced, simple")

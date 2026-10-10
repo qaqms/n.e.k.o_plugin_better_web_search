@@ -2,7 +2,7 @@
 # managed-template: plugin-market-actions-v1
 target-version = "py311"
 line-length = 120
-extend-exclude = ["vendor"]
+extend-exclude = ["vendor", "tests/.tooling", "tests/artifacts"]
 respect-gitignore = false
 
 [lint]

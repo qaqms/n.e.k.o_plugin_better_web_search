@@ -5,8 +5,8 @@ Design constraints, in order of why they matter:
 1. **No API key required.** The default chain uses Exa's public MCP gateway and
    AnySearch's anonymous tier, both verified to work without credentials, plus
    direct HTML scraping of Bing/Baidu. Keys are optional upgrades, never
-   prerequisites: a bad or spent key silently degrades to the anonymous tier for
-   that call instead of failing the user's search.
+   prerequisites: a failed backend falls through to the next source within a
+   bounded budget. Anonymous Exa fallback after a keyed failure is opt-in.
 2. **Zero third-party dependencies.** The host's plugin packaging rule is: any
    Python dependency declared in ``pyproject.toml`` must be vendored into
    ``vendor/``. This plugin uses only the standard library so the distributed
@@ -112,7 +112,7 @@ _ERROR_CODES = {
 
 # User-facing copy. Never interpolate raw upstream text or the key here.
 _MSG_KEY_INVALID = "Exa 密钥没验通过：这把已跳过，请到面板重新填写或加一把"
-_MSG_QUOTA = "Exa 密钥额度已用尽：这把已跳过，池里还有别的钥匙就接着用，额度每月自动刷新"
+_MSG_QUOTA = "Exa 密钥额度已用尽：池里还有别的钥匙就接着用，额度以服务商控制台为准"
 # Raised once the whole ring failed: wording lands in the "限流" bucket of the
 # self-check, which is what a dead pool actually looks like from the outside.
 _MSG_POOL_SPENT = "Exa 密钥池全部限流或额度用尽：本次改用其它搜索来源，稍后会再试"
@@ -121,11 +121,12 @@ _MSG_POOL_SPENT = "Exa 密钥池全部限流或额度用尽：本次改用其它
 # reports it as a network problem rather than 反爬.
 _MSG_EXA_UNREACHABLE = "Exa 这次连不上（超时或网络不可达）：本次改用其它搜索来源，稍后会再试"
 _MSG_NO_HOST = "未能读取宿主插件状态，请到插件中心确认『网络搜索』是否在运行"
-_QUOTA_NOTE = "每个账号每月刷新 $10 ≈ 1400 次；多填几把会自动轮流用，不填也能搜，只是匿名档慢且限额低"
+_QUOTA_NOTE = "密钥使用你账号的额度；匿名通道受公共限流影响。具体额度与计费以服务商控制台为准。"
 _ONBOARDING_HINT = (
-    "主人，『更好的网络搜索』装好啦。请到宿主「插件中心」把自带的『网络搜索』停用，"
-    "对话里的联网搜索就交给本插件——这一步要你亲手点，插件不替你按宿主的开关。"
-    "不填任何密钥也能直接搜；想搜得更多更稳，再去面板「进阶」里填 Exa 或 AnySearch 的免费密钥。"
+    "主人，『更好的网络搜索』装好啦，不用注册或填写密钥。"
+    "面板「概览」可以查看最近搜索，「诊断」可以检查网络；密钥在「设置」里，属于可选增强。"
+    "如果内置『网络搜索』也在运行，对话可能选用任意一个；面板会说明共存情况和停用的影响，"
+    "不会替你修改宿主。"
 )
 
 
@@ -809,9 +810,14 @@ class BetterWebSearchPlugin(NekoPluginBase):
             if remaining <= 1.0:
                 break
             attempted.append(name)
-            share = remaining if index == 0 else max(1.5, remaining / max(1, len(order) - index))
+            # Bound the whole attempt, including queueing and key rotation, not
+            # just its socket. Reserve time for later sources in auto mode.
+            slots = len(order) - index
+            reserve = min(remaining / 2, 2.0 * (slots - 1))
+            share = min(self._num("timeout_seconds", 12, 2, 30), remaining - reserve)
             try:
-                outcome = await self._search_once(name, query, limit, min(share, remaining))
+                async with asyncio.timeout(min(share, remaining)):
+                    outcome = await self._search_once(name, query, limit, min(share, remaining))
             except (BlockedError, BusyError, CooldownError, SearchProviderError,
                     _net.NetworkError, TimeoutError, asyncio.TimeoutError) as error:
                 last_error = error
@@ -1215,7 +1221,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
             return False, ms, 0, "Exa 判定这个密钥无效：请回面板重新粘贴（不填密钥也能匿名搜索）", "key"
         except QuotaExhaustedError:
             ms = int((time.perf_counter() - started) * 1000)
-            return False, ms, 0, "密钥有效但额度已用尽：每月自动刷新，先用匿名档也能搜", "quota"
+            return False, ms, 0, "密钥额度已用尽：请查看服务商控制台，搜索将按配置尝试其它来源", "quota"
         except Exception as error:
             ms = int((time.perf_counter() - started) * 1000)
             return (False, ms, 0,
@@ -1398,7 +1404,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
         self._exa_last_error = ""
         await self._save_key_ring()
         return Ok({"ok": True, "masked": "", "key_count": 0,
-                   "message": "已清空密钥池，回到匿名档（也能搜索，只是更慢更低额）"})
+                   "message": "已清空 Exa 密钥池，使用匿名通道；其它搜索来源不变"})
 
     @ui.action(label="重测全部密钥", icon="🧪", group="exa", order=40)
     @plugin_entry(
@@ -1412,7 +1418,7 @@ class BetterWebSearchPlugin(NekoPluginBase):
         pool = self._exa_keys()
         if not pool:
             return Ok({"ok": False, "key_count": 0, "keys": [],
-                       "message": "还没有填写密钥；不填也能用，匿名档稍慢限额低",
+                       "message": "没有已保存的 Exa 密钥；当前使用匿名通道，无需配置",
                        "latency_ms": 0, "count": 0})
         rows: List[Dict[str, Any]] = []
         usable = 0
