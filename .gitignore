@@ -12,3 +12,5 @@ build/
 store.db
 .env
 .DS_Store
+tests/.tooling/
+tests/artifacts/

@@ -293,6 +293,54 @@ def test_per_call_backend_still_locks_and_does_not_fall_back(monkeypatch) -> Non
     assert attempted == ["bing"]
 
 
+@pytest.mark.parametrize("total,socket_timeout", [(25, 12), (5, 30), (28, 30)])
+def test_fallback_budget_reserves_time_for_later_sources(monkeypatch, total, socket_timeout) -> None:
+    from types import SimpleNamespace
+
+    plugin = make_plugin({"total_timeout_seconds": total, "timeout_seconds": socket_timeout})
+    clock = [0.0]
+    budgets = []
+
+    async def attempt(name, query, limit, budget):
+        budgets.append((name, budget))
+        if name == "bing":
+            return {"results": exa_results(), "backend": name}
+        clock[0] += budget
+        raise TimeoutError("slow backend exhausted its attempt budget")
+
+    async def run():
+        monkeypatch.setattr(entries.asyncio, "get_running_loop",
+                            lambda: SimpleNamespace(time=lambda: clock[0]))
+        return await plugin._search_with_fallback("public query", 3, "auto")
+
+    monkeypatch.setattr(plugin, "_search_once", attempt)
+    outcome = asyncio.run(run())
+    assert outcome["backend"] == "bing"
+    assert [name for name, _ in budgets] == ["anysearch", "exa", "bing"]
+    assert budgets[0][1] <= socket_timeout
+    assert budgets[0][1] <= total / 2 if total == 5 else budgets[0][1] < total
+    assert clock[0] < total
+
+
+def test_a_stalled_attempt_is_cancelled_and_falls_back(monkeypatch) -> None:
+    plugin = make_plugin({"timeout_seconds": 2, "total_timeout_seconds": 5,
+                          "backend_chain": ["anysearch", "bing"]})
+    cancelled = []
+
+    async def attempt(name, query, limit, budget):
+        if name == "bing":
+            return {"results": exa_results(), "backend": name}
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.append(name)
+
+    monkeypatch.setattr(plugin, "_search_once", attempt)
+    outcome = asyncio.run(plugin._search_with_fallback("public query", 3, "auto"))
+    assert cancelled == ["anysearch"]
+    assert outcome["backend"] == "bing"
+
+
 def test_startup_report_matches_the_order_the_runtime_uses(monkeypatch) -> None:
     monkeypatch.setattr(net, "system_proxy_present", lambda: False)
     plugin = make_plugin({"backend": "baidu", "backend_chain": ["exa", "anysearch", "baidu"]})
@@ -598,9 +646,8 @@ def test_a_garbled_answer_rotates_without_blaming_the_key(monkeypatch) -> None:
 def test_a_hang_rotates_nothing_and_hands_exa_to_the_cooldown(monkeypatch) -> None:
     """No answer at all is nobody's key's fault, and stepping sideways cannot help.
 
-    Each hang costs the per-backend timeout, and the first backend in the chain
-    holds the entire 25 s budget: rotating would burn the pool and still leave
-    nothing for anysearch / bing behind it. So one hang exits the pass as the one
+    Each hang costs the per-backend timeout: rotating would burn the pool's attempt
+    budget on the same broken network. So one hang exits the pass as the one
     error class the coordinator cools down, and no key gets blamed or spent.
     """
     seen = _install_pool(monkeypatch, {KEY_A: net.NetworkError("请求超时")})
@@ -874,7 +921,7 @@ def test_panel_context_shape_and_mask(monkeypatch) -> None:
     assert context["proxy_detected"] is False
     assert context["host_search"] == {"exists": True, "running": True}
     assert context["ssrf_fake_ip"] is True
-    assert "$10" in context["quota_note"]
+    assert "控制台" in context["quota_note"]
     assert SECRET not in json.dumps(context, ensure_ascii=False)
 
 

@@ -15,6 +15,7 @@ backend_chain = ["anysearch", "exa", "bing", "baidu"]
 # 对话里没指定条数时用这个值（上限 15）
 max_results = 6
 timeout_seconds = 12
+# 每次完整尝试包含排队与密钥轮转，不能吃完后续来源的预算。
 total_timeout_seconds = 25
 
 # 代理：auto=跟随系统/环境变量，off=不用，on=全走，或直接填 http://127.0.0.1:7890
